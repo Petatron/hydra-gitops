@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cilium
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://helm.cilium.io/
+    chart: cilium
+    targetRevision: "1.*"
+    helm:
+      valuesObject:
+        # Tune these to match your cluster — these are common homelab defaults.
+        # See: https://docs.cilium.io/en/stable/helm-reference/
+        kubeProxyReplacement: true
+        k8sServiceHost: "192.168.15.10"
+        k8sServicePort: "6443"
+        hubble:
+          relay:
+            enabled: true
+          ui:
+            enabled: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
