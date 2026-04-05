@@ -5,15 +5,17 @@ GitOps repo for the home K8s cluster. ArgoCD watches this repo and reconciles al
 ## Architecture
 
 ```
-                    ┌─────────────────────────────┐
-                    │  this repo (hydra-gitops)    │
-                    │                              │
-                    │  apps/          infrastructure/
-                    │  ├─ cilium.yaml   ├─ namespaces/
-                    │  ├─ keda.yaml     └─ storage/
+                    ┌──────────────────────────────────┐
+                    │  this repo (hydra-gitops)         │
+                    │                                   │
+                    │  apps/              infrastructure/
+                    │  ├─ argo-cd.yaml     ├─ metallb/
+                    │  ├─ cilium.yaml      ├─ namespaces/
+                    │  ├─ keda.yaml        └─ storage/
+                    │  ├─ local-path-provisioner.yaml
                     │  ├─ metallb.yaml
                     │  └─ infrastructure.yaml
-                    └──────────┬──────────────────┘
+                    └──────────┬───────────────────────┘
                                │ ArgoCD watches main branch
                                ▼
                     ┌──────────────────────┐
@@ -22,7 +24,7 @@ GitOps repo for the home K8s cluster. ArgoCD watches this repo and reconciles al
                     └──┬───┬───┬───┬──────┘
                        │   │   │   │  auto-sync
                        ▼   ▼   ▼   ▼
-                    Cilium KEDA MetalLB  infra manifests
+                    ArgoCD Cilium KEDA MetalLB local-path infra
 ```
 
 **To add an add-on**: create a new `apps/<name>.yaml` ArgoCD Application, push to `main`.
@@ -49,16 +51,20 @@ After bootstrap, **all management is done via git**. Push changes to `main` and 
 ## Repo Layout
 
 ```
-├── bootstrap/              # One-time setup (run manually once)
-│   ├── install.sh          # Installs ArgoCD + root app
-│   ├── argo-cd.yaml        # ArgoCD self-management Application
-│   └── root-app.yaml       # Root app-of-apps (watches apps/)
-├── apps/                   # ArgoCD Application manifests (one per add-on)
-│   ├── cilium.yaml         # Cilium CNI + Hubble UI
-│   ├── keda.yaml           # KEDA autoscaler
-│   ├── metallb.yaml        # MetalLB load balancer
-│   └── infrastructure.yaml # Points to infrastructure/ dir
-└── infrastructure/         # Raw K8s manifests (namespaces, storage, etc.)
+├── bootstrap/                       # One-time setup (run manually once)
+│   ├── install.sh                   # Installs ArgoCD + root app
+│   ├── argo-cd.yaml                 # ArgoCD Helm values reference
+│   └── root-app.yaml               # Root app-of-apps (watches apps/)
+├── apps/                            # ArgoCD Application manifests (one per add-on)
+│   ├── argo-cd.yaml                 # ArgoCD self-management (Helm)
+│   ├── cilium.yaml                  # Cilium CNI + Hubble UI
+│   ├── keda.yaml                    # KEDA autoscaler
+│   ├── local-path-provisioner.yaml  # Rancher local-path StorageClass
+│   ├── metallb.yaml                 # MetalLB load balancer
+│   └── infrastructure.yaml          # Points to infrastructure/ dir
+└── infrastructure/                  # Raw K8s manifests (namespaces, storage, etc.)
+    ├── metallb/
+    │   └── address-pool.yaml        # IPAddressPool 192.168.15.200-250 + L2
     ├── namespaces/
     └── storage/
 ```
