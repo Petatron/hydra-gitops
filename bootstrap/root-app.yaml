@@ -8,8 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    # TODO: replace with your actual repo URL after first push
-    repoURL: https://github.com/YOUR_USER/hydra-gitops.git
+    repoURL: https://github.com/Petatron/hydra-gitops.git
     targetRevision: main
     path: apps
     directory:
