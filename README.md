@@ -12,7 +12,6 @@ GitOps repo for the home K8s cluster. ArgoCD watches this repo and reconciles al
                     │  ├─ argo-cd.yaml     ├─ metallb/
                     │  ├─ cilium.yaml      ├─ namespaces/
                     │  ├─ keda.yaml        └─ storage/
-                    │  ├─ local-path-provisioner.yaml
                     │  ├─ metallb.yaml
                     │  └─ infrastructure.yaml
                     └──────────┬───────────────────────┘
@@ -24,7 +23,7 @@ GitOps repo for the home K8s cluster. ArgoCD watches this repo and reconciles al
                     └──┬───┬───┬───┬──────┘
                        │   │   │   │  auto-sync
                        ▼   ▼   ▼   ▼
-                    ArgoCD Cilium KEDA MetalLB local-path infra
+                    ArgoCD Cilium KEDA MetalLB infra manifests
 ```
 
 **To add an add-on**: create a new `apps/<name>.yaml` ArgoCD Application, push to `main`.
@@ -59,7 +58,6 @@ After bootstrap, **all management is done via git**. Push changes to `main` and 
 │   ├── argo-cd.yaml                 # ArgoCD self-management (Helm)
 │   ├── cilium.yaml                  # Cilium CNI + Hubble UI
 │   ├── keda.yaml                    # KEDA autoscaler
-│   ├── local-path-provisioner.yaml  # Rancher local-path StorageClass
 │   ├── metallb.yaml                 # MetalLB load balancer
 │   └── infrastructure.yaml          # Points to infrastructure/ dir
 └── infrastructure/                  # Raw K8s manifests (namespaces, storage, etc.)
@@ -67,6 +65,7 @@ After bootstrap, **all management is done via git**. Push changes to `main` and 
     │   └── address-pool.yaml        # IPAddressPool 192.168.15.200-250 + L2
     ├── namespaces/
     └── storage/
+        └── local-path.yaml         # Rancher local-path-provisioner (default SC)
 ```
 
 ## Adding a New App
