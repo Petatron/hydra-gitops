@@ -1,0 +1,62 @@
+# Cilium, adopted rather than installed.
+#
+# It was put here by `cilium install` while bringing the cluster up, because a
+# kubeadm control plane stays NotReady until a CNI exists and Argo CD could not
+# run before that. These values are transcribed from the live cilium-config, so
+# taking ownership changes nothing about the running cluster:
+#
+#   cluster-pool-ipv4-cidr  10.244.0.0/16   <- matches what KCP told kubeadm
+#   routing-mode            tunnel
+#   kube-proxy-replacement  false           <- kube-proxy is installed here
+#
+# Getting any of those wrong is not a cosmetic drift. An unset pod CIDR falls
+# back to the chart default 10.0.0.0/8 and renumbers every pod; flipping
+# kubeProxyReplacement while kube-proxy is running leaves two things owning
+# service routing. Both are what the top-level apps/cilium.yaml would have done.
+#
+# The version is pinned to what is installed, so adoption is not also an upgrade.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hydra-wl0-cilium
+  namespace: argocd
+  # No resources-finalizer, deliberately, and it is the only app here without
+  # one. That finalizer makes deleting the Application cascade-delete the
+  # resources it manages -- and the root app prunes, so renaming or removing
+  # this file would delete the Application and take the CNI with it. `prune:
+  # false` below does not help: it governs what a sync prunes, not what
+  # deletion cascades.
+  #
+  # Without the finalizer, losing this Application leaves Cilium running and
+  # simply unmanaged, which is the failure everyone can recover from.
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+spec:
+  project: default
+  source:
+    repoURL: https://helm.cilium.io/
+    chart: cilium
+    targetRevision: "1.19.1"
+    helm:
+      valuesObject:
+        kubeProxyReplacement: false
+        routingMode: tunnel
+        ipam:
+          mode: cluster-pool
+          operator:
+            clusterPoolIPv4PodCIDRList:
+              - 10.244.0.0/16
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      # prune is deliberately off. The CNI is the one add-on whose removal takes
+      # the cluster with it, and Argo adopting a Helm-installed release will not
+      # match it resource-for-resource on the first pass.
+      prune: false
+      selfHeal: true
+    syncOptions:
+      # Required to adopt objects Helm already owns without fighting over the
+      # managed-by metadata.
+      - ServerSideApply=true
