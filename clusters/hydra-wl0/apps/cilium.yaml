@@ -20,8 +20,15 @@ kind: Application
 metadata:
   name: hydra-wl0-cilium
   namespace: argocd
-  finalizers:
-    - resources-finalizer.argocd.argoproj.io
+  # No resources-finalizer, deliberately, and it is the only app here without
+  # one. That finalizer makes deleting the Application cascade-delete the
+  # resources it manages -- and the root app prunes, so renaming or removing
+  # this file would delete the Application and take the CNI with it. `prune:
+  # false` below does not help: it governs what a sync prunes, not what
+  # deletion cascades.
+  #
+  # Without the finalizer, losing this Application leaves Cilium running and
+  # simply unmanaged, which is the failure everyone can recover from.
   annotations:
     argocd.argoproj.io/sync-wave: "-3"
 spec:
