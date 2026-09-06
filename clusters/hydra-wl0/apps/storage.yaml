@@ -1,0 +1,29 @@
+# The cluster kubeadm builds has no StorageClass at all, so anything wanting a
+# PVC stays Pending with no obvious cause. Points at the shared manifest --
+# there is nothing cluster-specific in it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hydra-wl0-storage
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Petatron/hydra-gitops.git
+    targetRevision: main
+    path: infrastructure/storage
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: local-path-storage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
