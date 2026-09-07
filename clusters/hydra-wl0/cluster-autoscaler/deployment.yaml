@@ -31,6 +31,24 @@ spec:
     spec:
       serviceAccountName: cluster-autoscaler
       terminationGracePeriodSeconds: 10
+      # 65532 is not a guess: the image config for
+      # registry.k8s.io/autoscaling/cluster-autoscaler:v1.35.2 declares
+      # User: "65532", the distroless "nonroot" account.
+      #
+      # fsGroup is what makes the mounted kubeconfig readable at all. Secret
+      # volume files are owned root:root, so a root-only mode leaves the
+      # process unable to open /etc/capi/kubeconfig -- and the symptom is a
+      # crash loop on a permissions error, which reads nothing like the
+      # discovery problem someone debugging PET-10 would be looking for.
+      # fsGroup regroups the volume to 65532; the file mode below is 0440 so it
+      # stays unreadable to everyone else rather than world-readable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       # The control-plane nodes are the only ones guaranteed to exist: a pool
       # CA is allowed to shrink is a poor place to run the thing doing the
       # shrinking.
@@ -50,10 +68,16 @@ spec:
             # side -- this cluster -- and this kubeconfig for the side holding
             # the MachineDeployments. The Secret is NOT in Git: see README.md.
             - --cloud-config=/etc/capi/kubeconfig
-            # Scoped to this cluster's own MachineDeployments. Without
-            # clusterName, CA would also discover hydra-md-0, which belongs to
-            # the management cluster's own workload pool and has nothing to do
-            # with this cluster's scheduling pressure.
+            # Selects this cluster's own MachineDeployments. Without
+            # clusterName, CA would also pick up hydra-md-0, which belongs to
+            # the management cluster's own pool and has nothing to do with this
+            # cluster's scheduling pressure.
+            #
+            # This is a SELECTION filter, not an authorization boundary: it
+            # governs what this process chooses to act on, and anyone holding
+            # the mounted token can ignore it. The resourceNames rule in
+            # ../management-cluster/cluster-autoscaler-rbac.yaml is what
+            # actually stops that token scaling another cluster's pool.
             - --node-group-auto-discovery=clusterapi:namespace=default,clusterName=hydra-wl0
             # PET-10 proves discovery, nothing more. Scale-down is PET-13's, and
             # leaving it on here would let CA drain this cluster's workers as
@@ -94,9 +118,10 @@ spec:
             capabilities:
               drop: ["ALL"]
             readOnlyRootFilesystem: true
-            runAsNonRoot: true
       volumes:
         - name: capi-kubeconfig
           secret:
             secretName: cluster-autoscaler-management-kubeconfig
-            defaultMode: 0400
+            # Group-readable, paired with the pod's fsGroup above. Not 0444:
+            # this file is a credential for another cluster.
+            defaultMode: 0440

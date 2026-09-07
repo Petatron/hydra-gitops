@@ -13,11 +13,20 @@
 # ############################################################################
 #
 # This is the identity hydra-wl0's Cluster Autoscaler assumes when it reads and
-# scales MachineDeployments. It is deliberately NOT management admin: the token
-# generated from this ServiceAccount is copied into the workload cluster, so
-# anyone with access to hydra-wl0 gains exactly these permissions on the
-# management cluster. Admin there would mean the workload cluster could create
-# and destroy VMs belonging to any cluster the management cluster runs.
+# scales MachineDeployments. Its token is copied into hydra-wl0, so **anyone
+# with access to that cluster holds exactly these permissions here.**
+#
+# What that does and does not buy, stated plainly rather than optimistically:
+#
+#   - Reads are CLUSTER-WIDE and cannot be narrowed. Node-group discovery lists
+#     and watches across namespaces, and RBAC's resourceNames does not apply to
+#     list or watch. So this token can read every Cluster API object on the
+#     management cluster, including other clusters'.
+#   - Writes are pinned to this cluster's own pool by resourceNames, below.
+#   - `--node-group-auto-discovery=...,clusterName=hydra-wl0` on the Deployment
+#     is NOT an authorization boundary. It only filters what that process
+#     chooses to act on; anyone who copies the token can ignore it. The
+#     resourceNames rule is the part that actually constrains a holder.
 
 apiVersion: v1
 kind: Namespace
@@ -30,18 +39,16 @@ metadata:
   name: cluster-autoscaler-hydra-wl0
   namespace: cluster-autoscaler-hydra-wl0
 ---
-# Rules from the upstream clusterapi example's cluster-autoscaler-management
-# role (cluster-autoscaler-release-1.35).
+# Read half: shared, and necessarily cluster-wide.
 #
-# Note there is no `delete` on machines, and that is correct rather than an
-# oversight: CA scales a pool down by annotating the machines it has chosen and
-# lowering the MachineDeployment's replica count. Cluster API does the deleting.
-# Granting delete here would let CA remove a Machine while its MachineDeployment
-# still wanted it, and the MachineSet would immediately build a replacement.
+# Discovery lists and watches these kinds across namespaces to find node groups
+# and to map Nodes back to Machines. resourceNames cannot restrict list/watch --
+# those requests name no resource -- so there is nothing to pin here, and a
+# second workload cluster's autoscaler can reuse this same role.
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: cluster-autoscaler-management
+  name: cluster-autoscaler-management-read
 rules:
   - apiGroups:
       - cluster.x-k8s.io
@@ -54,17 +61,75 @@ rules:
     verbs:
       - get
       - list
-      - update
       - watch
+---
+# Write half: per-cluster, and pinned to the one pool this autoscaler scales.
+#
+# Deliberately NOT merged into the read role. That one is shared by every
+# workload cluster's autoscaler, and resourceNames cannot live in a shared role
+# without granting each autoscaler write access to the others' pools.
+#
+# Three details worth stating, all verified against the 1.35 source rather than
+# copied from the upstream example:
+#
+#  1. Only the `scale` subresource. SetSize patches
+#     `Scales(namespace).Patch(gvr, name, ...)` and never writes the
+#     MachineDeployment object, so `update` on `machinedeployments` itself would
+#     be unused.
+#
+#  2. `patch` is REQUIRED, and the upstream clusterapi example omits it -- it
+#     grants get/list/update/watch only. SetSize issues a MergePatch, and RBAC
+#     treats patch and update as different verbs, so the example as published
+#     would return 403 at the moment of the first scale-up. That failure would
+#     surface during PET-12 as a permissions error at the worst possible time,
+#     so both verbs are granted here.
+#
+#  3. No `update` on machines, machinesets or machinepools. CA scales a pool
+#     down by Update-ing the chosen Machine with a delete annotation
+#     (MarkMachineForDeletion) and lowering the replica count -- Cluster API
+#     does the deleting. This Deployment runs with --scale-down-enabled=false,
+#     so it never takes that path, and the permission arrives with PET-13
+#     alongside the behaviour that needs it.
+#
+# Adding a second pool means adding its name below. That is the intended cost:
+# the alternative is a token that can scale pools nobody has thought about.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-scale-hydra-wl0
+rules:
+  - apiGroups:
+      - cluster.x-k8s.io
+    resources:
+      - machinedeployments/scale
+    resourceNames:
+      - hydra-wl0-md-0
+    verbs:
+      - get
+      - patch
+      - update
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: cluster-autoscaler-management-hydra-wl0
+  name: cluster-autoscaler-management-read-hydra-wl0
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: cluster-autoscaler-management
+  name: cluster-autoscaler-management-read
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler-hydra-wl0
+    namespace: cluster-autoscaler-hydra-wl0
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-scale-hydra-wl0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler-management-scale-hydra-wl0
 subjects:
   - kind: ServiceAccount
     name: cluster-autoscaler-hydra-wl0
@@ -96,10 +161,14 @@ subjects:
 #
 # Kubernetes 1.24 stopped auto-creating these, and `kubectl create token` issues
 # a short-lived one that would expire under a long-running Deployment with no
-# mechanism here to refresh it. So the Secret is requested explicitly. It is the
-# credential that ends up inside the workload cluster -- see ../README.md for
-# how it becomes a kubeconfig, and treat rotating it as a real task rather than
-# a someday.
+# mechanism here to refresh it. So the Secret is requested explicitly.
+#
+# It is populated asynchronously by the token controller: `kubectl apply` of
+# this Secret returns before `.data.token` exists, so anything reading the token
+# must wait for it first. See ../cluster-autoscaler/README.md, which does.
+#
+# This is the credential that ends up inside the workload cluster. Rotating it
+# is a real task, not a someday.
 apiVersion: v1
 kind: Secret
 metadata:
