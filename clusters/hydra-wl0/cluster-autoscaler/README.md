@@ -36,8 +36,11 @@ admin" might suggest:
   CA process chooses to act on. Anyone holding the token can ignore it; the
   `resourceNames` rule is the part that constrains a holder.
 
-It cannot destroy VMs the way cluster-admin could, and it holds no `update` on
-`machines` at all until PET-13 adds scale-down.
+A holder can scale `hydra-wl0-md-0` to zero, causing Cluster API to delete that
+pool's worker VMs. `--scale-down-enabled=false` controls the autoscaler's
+behaviour; it does not prevent a token holder from making that scale request.
+The credential cannot directly update Machines or scale `hydra-md-0`. Direct
+`update` on `machines` is withheld until PET-13 adds autoscaler scale-down.
 
 ## Setup
 
@@ -88,10 +91,10 @@ Confirm it works, and that it is as constrained as claimed, before installing it
 
 ```sh
 kubectl --kubeconfig=/tmp/capi-kubeconfig -n default get machinedeployments
-kubectl --kubeconfig=/tmp/capi-kubeconfig auth can-i patch machinedeployments \
-  --subresource=scale -n default hydra-wl0-md-0     # expect: yes
-kubectl --kubeconfig=/tmp/capi-kubeconfig auth can-i patch machinedeployments \
-  --subresource=scale -n default hydra-md-0         # expect: no
+kubectl --kubeconfig=/tmp/capi-kubeconfig auth can-i patch machinedeployments/hydra-wl0-md-0 \
+  --subresource=scale -n default                  # expect: yes
+kubectl --kubeconfig=/tmp/capi-kubeconfig auth can-i patch machinedeployments/hydra-md-0 \
+  --subresource=scale -n default                  # expect: no
 ```
 
 ### 3. Install it here
