@@ -1,0 +1,179 @@
+# ############################################################################
+# APPLIED TO THE MANAGEMENT CLUSTER, NOT TO hydra-wl0.
+#
+# Nothing in this directory is synced by Argo CD, and pointing an Application at
+# it would be a mistake: these objects belong to the cluster that holds the
+# Cluster API objects, which has no Argo CD of its own. Apply by hand:
+#
+#   kubectl --context <management> apply -f cluster-autoscaler-rbac.yaml
+#
+# It lives beside the workload manifests anyway, because a reader trying to
+# understand how CA reaches two clusters needs both halves in one place, and the
+# half that is missing is the half that gets forgotten.
+# ############################################################################
+#
+# This is the identity hydra-wl0's Cluster Autoscaler assumes when it reads and
+# scales MachineDeployments. Its token is copied into hydra-wl0, so **anyone
+# with access to that cluster holds exactly these permissions here.**
+#
+# What that does and does not buy, stated plainly rather than optimistically:
+#
+#   - Reads are CLUSTER-WIDE and cannot be narrowed. Node-group discovery lists
+#     and watches across namespaces, and RBAC's resourceNames does not apply to
+#     list or watch. So this token can read every Cluster API object on the
+#     management cluster, including other clusters'.
+#   - Writes are pinned to this cluster's own pool by resourceNames, below.
+#   - `--node-group-auto-discovery=...,clusterName=hydra-wl0` on the Deployment
+#     is NOT an authorization boundary. It only filters what that process
+#     chooses to act on; anyone who copies the token can ignore it. The
+#     resourceNames rule is the part that actually constrains a holder.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cluster-autoscaler-hydra-wl0
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler-hydra-wl0
+  namespace: cluster-autoscaler-hydra-wl0
+---
+# Read half: shared, and necessarily cluster-wide.
+#
+# Discovery lists and watches these kinds across namespaces to find node groups
+# and to map Nodes back to Machines. resourceNames cannot restrict list/watch --
+# those requests name no resource -- so there is nothing to pin here, and a
+# second workload cluster's autoscaler can reuse this same role.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-read
+rules:
+  - apiGroups:
+      - cluster.x-k8s.io
+    resources:
+      - machinedeployments
+      - machinedeployments/scale
+      - machines
+      - machinesets
+      - machinepools
+    verbs:
+      - get
+      - list
+      - watch
+---
+# Write half: per-cluster, and pinned to the one pool this autoscaler scales.
+#
+# Deliberately NOT merged into the read role. That one is shared by every
+# workload cluster's autoscaler, and resourceNames cannot live in a shared role
+# without granting each autoscaler write access to the others' pools.
+#
+# Three details worth stating, all verified against the 1.35 source rather than
+# copied from the upstream example:
+#
+#  1. Only the `scale` subresource. SetSize patches
+#     `Scales(namespace).Patch(gvr, name, ...)` and never writes the
+#     MachineDeployment object, so `update` on `machinedeployments` itself would
+#     be unused.
+#
+#  2. `patch` is REQUIRED, and the upstream clusterapi example omits it -- it
+#     grants get/list/update/watch only. SetSize issues a MergePatch, and RBAC
+#     treats patch and update as different verbs, so the example as published
+#     would return 403 at the moment of the first scale-up. That failure would
+#     surface during PET-12 as a permissions error at the worst possible time,
+#     so both verbs are granted here.
+#
+#  3. No `update` on machines, machinesets or machinepools. CA scales a pool
+#     down by Update-ing the chosen Machine with a delete annotation
+#     (MarkMachineForDeletion) and lowering the replica count -- Cluster API
+#     does the deleting. This Deployment runs with --scale-down-enabled=false,
+#     so it never takes that path, and the permission arrives with PET-13
+#     alongside the behaviour that needs it.
+#
+# Adding a second pool means adding its name below. That is the intended cost:
+# the alternative is a token that can scale pools nobody has thought about.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-scale-hydra-wl0
+rules:
+  - apiGroups:
+      - cluster.x-k8s.io
+    resources:
+      - machinedeployments/scale
+    resourceNames:
+      - hydra-wl0-md-0
+    verbs:
+      - get
+      - patch
+      - update
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-read-hydra-wl0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler-management-read
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler-hydra-wl0
+    namespace: cluster-autoscaler-hydra-wl0
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-scale-hydra-wl0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler-management-scale-hydra-wl0
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler-hydra-wl0
+    namespace: cluster-autoscaler-hydra-wl0
+---
+# Scale-from-zero. With a MachineDeployment at zero replicas there is no Node to
+# inspect, so CA sizes the pool from HydraMachineTemplate.status.capacity -- and
+# it reads that with a dynamic client that lists and watches, not a plain get.
+#
+# The ClusterRole referenced here is shipped by cluster-api-provider-hydra
+# (config/rbac/cluster_autoscaler_role.yaml, PET-27) and intentionally left
+# unbound, because the provider cannot know which ServiceAccount will need it.
+# This is that binding. The prefixed name is what the provider's kustomize
+# overlay actually renders; the unprefixed name does not exist on the cluster.
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-hydramachinetemplates-hydra-wl0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-api-provider-hydra-hydramachinetemplate-autoscaler-role
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler-hydra-wl0
+    namespace: cluster-autoscaler-hydra-wl0
+---
+# A long-lived token for the ServiceAccount above.
+#
+# Kubernetes 1.24 stopped auto-creating these, and `kubectl create token` issues
+# a short-lived one that would expire under a long-running Deployment with no
+# mechanism here to refresh it. So the Secret is requested explicitly.
+#
+# It is populated asynchronously by the token controller: `kubectl apply` of
+# this Secret returns before `.data.token` exists, so anything reading the token
+# must wait for it first. See ../cluster-autoscaler/README.md, which does.
+#
+# This is the credential that ends up inside the workload cluster. Rotating it
+# is a real task, not a someday.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster-autoscaler-hydra-wl0-token
+  namespace: cluster-autoscaler-hydra-wl0
+  annotations:
+    kubernetes.io/service-account.name: cluster-autoscaler-hydra-wl0
+type: kubernetes.io/service-account-token

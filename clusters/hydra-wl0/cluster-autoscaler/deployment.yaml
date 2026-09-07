@@ -1,0 +1,127 @@
+# Cluster Autoscaler for hydra-wl0, scaling MachineDeployments that live on a
+# different cluster.
+#
+# The version is not arbitrary. CA's minor tracks Kubernetes', and this cluster
+# runs v1.35.3 -- but the load-bearing reason for >= 1.33 is that Hydra's
+# MachineDeployments use the Cluster API v1beta2 infrastructureRef shape:
+#
+#   {"apiGroup":"infrastructure.cluster.x-k8s.io","kind":"HydraMachineTemplate",...}
+#
+# Older releases only understand `apiVersion` and cannot resolve that reference
+# at all, which costs scale-from-zero silently. 1.33/1.34 resolve it through the
+# API *group's* preferred version and 1.35 through the *kind's*; both give the
+# same answer while infrastructure.cluster.x-k8s.io serves only v1alpha1, and
+# they stop agreeing the day a second version ships.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: cluster-autoscaler
+  labels:
+    app: cluster-autoscaler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      serviceAccountName: cluster-autoscaler
+      terminationGracePeriodSeconds: 10
+      # 65532 is not a guess: the image config for
+      # registry.k8s.io/autoscaling/cluster-autoscaler:v1.35.2 declares
+      # User: "65532", the distroless "nonroot" account.
+      #
+      # fsGroup is what makes the mounted kubeconfig readable at all. Secret
+      # volume files are owned root:root, so a root-only mode leaves the
+      # process unable to open /etc/capi/kubeconfig -- and the symptom is a
+      # crash loop on a permissions error, which reads nothing like the
+      # discovery problem someone debugging PET-10 would be looking for.
+      # fsGroup regroups the volume to 65532; the file mode below is 0440 so it
+      # stays unreadable to everyone else rather than world-readable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # The control-plane nodes are the only ones guaranteed to exist: a pool
+      # CA is allowed to shrink is a poor place to run the thing doing the
+      # shrinking.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      containers:
+        - name: cluster-autoscaler
+          image: registry.k8s.io/autoscaling/cluster-autoscaler:v1.35.2
+          command:
+            - /cluster-autoscaler
+          args:
+            - --cloud-provider=clusterapi
+            # The management cluster. CA uses in-cluster config for the workload
+            # side -- this cluster -- and this kubeconfig for the side holding
+            # the MachineDeployments. The Secret is NOT in Git: see README.md.
+            - --cloud-config=/etc/capi/kubeconfig
+            # Selects this cluster's own MachineDeployments. Without
+            # clusterName, CA would also pick up hydra-md-0, which belongs to
+            # the management cluster's own pool and has nothing to do with this
+            # cluster's scheduling pressure.
+            #
+            # This is a SELECTION filter, not an authorization boundary: it
+            # governs what this process chooses to act on, and anyone holding
+            # the mounted token can ignore it. The resourceNames rule in
+            # ../management-cluster/cluster-autoscaler-rbac.yaml is what
+            # actually stops that token scaling another cluster's pool.
+            - --node-group-auto-discovery=clusterapi:namespace=default,clusterName=hydra-wl0
+            # PET-10 proves discovery, nothing more. Scale-down is PET-13's, and
+            # leaving it on here would let CA drain this cluster's workers as
+            # soon as it decided they were underutilised -- on the only cluster
+            # Hydra has ever been proven to build.
+            - --scale-down-enabled=false
+            # Node-group discovery and capacity resolution are logged at V(4),
+            # and PET-10's acceptance criteria are about exactly those lines.
+            - --v=4
+            - --logtostderr=true
+            - --stderrthreshold=info
+          # No env needed. Verified against BuildClusterAPI in the 1.35 source:
+          # the management config comes from --cloud-config, and the workload
+          # config from --kubeconfig -- which, left unset, resolves to
+          # in-cluster config. CAPI_GROUP only overrides the Cluster API group
+          # name and setting it to its own default would be noise.
+          volumeMounts:
+            - name: capi-kubeconfig
+              mountPath: /etc/capi
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 300Mi
+            limits:
+              memory: 500Mi
+          ports:
+            - name: metrics
+              containerPort: 8085
+          livenessProbe:
+            httpGet:
+              path: /health-check
+              port: 8085
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: capi-kubeconfig
+          secret:
+            secretName: cluster-autoscaler-management-kubeconfig
+            # Group-readable, paired with the pod's fsGroup above. Not 0444:
+            # this file is a credential for another cluster.
+            defaultMode: 0440
