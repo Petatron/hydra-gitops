@@ -111,6 +111,30 @@ rules:
       - create
       - get
       - update
+  # Dynamic Resource Allocation. NOT in the upstream clusterapi example, which
+  # predates DRA becoming unconditional -- and its absence is fatal rather than
+  # noisy on a 1.34+ cluster.
+  #
+  # In 1.35 `--enable-dynamic-resource-allocation` defaults to true and is
+  # "locked to true": passing false makes the process klog.Fatalf and exit. So
+  # CA always starts DeviceClass, ResourceClaim and ResourceSlice informers,
+  # whether or not the cluster uses DRA, and without these rules their
+  # reflectors retry forever and the main loop never runs.
+  #
+  # The way that presents is the reason this comment is long: the pod stays
+  # Running 1/1, the liveness probe keeps passing, `kubectl get pods` looks
+  # perfect, and the only symptom is that no node group is ever discovered --
+  # which is indistinguishable from the annotations being wrong.
+  - apiGroups:
+      - resource.k8s.io
+    resources:
+      - deviceclasses
+      - resourceclaims
+      - resourceslices
+    verbs:
+      - get
+      - list
+      - watch
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
