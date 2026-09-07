@@ -1,0 +1,110 @@
+# ############################################################################
+# APPLIED TO THE MANAGEMENT CLUSTER, NOT TO hydra-wl0.
+#
+# Nothing in this directory is synced by Argo CD, and pointing an Application at
+# it would be a mistake: these objects belong to the cluster that holds the
+# Cluster API objects, which has no Argo CD of its own. Apply by hand:
+#
+#   kubectl --context <management> apply -f cluster-autoscaler-rbac.yaml
+#
+# It lives beside the workload manifests anyway, because a reader trying to
+# understand how CA reaches two clusters needs both halves in one place, and the
+# half that is missing is the half that gets forgotten.
+# ############################################################################
+#
+# This is the identity hydra-wl0's Cluster Autoscaler assumes when it reads and
+# scales MachineDeployments. It is deliberately NOT management admin: the token
+# generated from this ServiceAccount is copied into the workload cluster, so
+# anyone with access to hydra-wl0 gains exactly these permissions on the
+# management cluster. Admin there would mean the workload cluster could create
+# and destroy VMs belonging to any cluster the management cluster runs.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cluster-autoscaler-hydra-wl0
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler-hydra-wl0
+  namespace: cluster-autoscaler-hydra-wl0
+---
+# Rules from the upstream clusterapi example's cluster-autoscaler-management
+# role (cluster-autoscaler-release-1.35).
+#
+# Note there is no `delete` on machines, and that is correct rather than an
+# oversight: CA scales a pool down by annotating the machines it has chosen and
+# lowering the MachineDeployment's replica count. Cluster API does the deleting.
+# Granting delete here would let CA remove a Machine while its MachineDeployment
+# still wanted it, and the MachineSet would immediately build a replacement.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management
+rules:
+  - apiGroups:
+      - cluster.x-k8s.io
+    resources:
+      - machinedeployments
+      - machinedeployments/scale
+      - machines
+      - machinesets
+      - machinepools
+    verbs:
+      - get
+      - list
+      - update
+      - watch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-hydra-wl0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler-management
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler-hydra-wl0
+    namespace: cluster-autoscaler-hydra-wl0
+---
+# Scale-from-zero. With a MachineDeployment at zero replicas there is no Node to
+# inspect, so CA sizes the pool from HydraMachineTemplate.status.capacity -- and
+# it reads that with a dynamic client that lists and watches, not a plain get.
+#
+# The ClusterRole referenced here is shipped by cluster-api-provider-hydra
+# (config/rbac/cluster_autoscaler_role.yaml, PET-27) and intentionally left
+# unbound, because the provider cannot know which ServiceAccount will need it.
+# This is that binding. The prefixed name is what the provider's kustomize
+# overlay actually renders; the unprefixed name does not exist on the cluster.
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-hydramachinetemplates-hydra-wl0
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-api-provider-hydra-hydramachinetemplate-autoscaler-role
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler-hydra-wl0
+    namespace: cluster-autoscaler-hydra-wl0
+---
+# A long-lived token for the ServiceAccount above.
+#
+# Kubernetes 1.24 stopped auto-creating these, and `kubectl create token` issues
+# a short-lived one that would expire under a long-running Deployment with no
+# mechanism here to refresh it. So the Secret is requested explicitly. It is the
+# credential that ends up inside the workload cluster -- see ../README.md for
+# how it becomes a kubeconfig, and treat rotating it as a real task rather than
+# a someday.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cluster-autoscaler-hydra-wl0-token
+  namespace: cluster-autoscaler-hydra-wl0
+  annotations:
+    kubernetes.io/service-account.name: cluster-autoscaler-hydra-wl0
+type: kubernetes.io/service-account-token

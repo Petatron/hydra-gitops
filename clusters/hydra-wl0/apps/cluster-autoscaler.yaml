@@ -1,0 +1,43 @@
+# Cluster Autoscaler for hydra-wl0 (PET-10).
+#
+# Cluster-specific rather than pointing at a shared path, unlike apps/storage.yaml:
+# the discovery argument names this cluster, and the management kubeconfig it
+# mounts is this cluster's own credential. There is nothing here a second cluster
+# could reuse unedited.
+#
+# Runs in the workload cluster on purpose. CA needs both clusters -- Pods and
+# Nodes here, MachineDeployments on the management cluster -- and its workload
+# side is a single connection, so it cannot watch two workload clusters at once.
+# One CA per workload cluster is therefore the shape that survives a second
+# cluster existing; one CA on the management cluster is not. It also keeps the
+# only Argo CD in the picture (this one) as the thing that deploys it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hydra-wl0-cluster-autoscaler
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Petatron/hydra-gitops.git
+    targetRevision: main
+    path: clusters/hydra-wl0/cluster-autoscaler
+    directory:
+      recurse: false
+      include: "*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cluster-autoscaler
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+# No ignoreDifferences for the management kubeconfig Secret, and that is
+# deliberate rather than an omission. `prune: true` only removes resources Argo
+# is already tracking; a Secret created by hand carries none of Argo's tracking
+# metadata, so it is invisible to this Application and cannot be pruned by it.
+# Adding an ignore rule would suggest a hazard that does not exist.

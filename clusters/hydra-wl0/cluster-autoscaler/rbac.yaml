@@ -1,0 +1,126 @@
+# Workload-cluster half of Cluster Autoscaler's permissions.
+#
+# CA needs two clusters: the Pods and Nodes it reacts to are here on hydra-wl0,
+# while the MachineDeployments it scales live on the management cluster. This
+# file is only the first half. The management half is a separate ServiceAccount
+# over there -- see ../management-cluster/cluster-autoscaler-rbac.yaml, which
+# Argo CD does NOT sync because it targets a different cluster.
+#
+# Rules copied from the upstream clusterapi example for the matching release
+# (cluster-autoscaler-release-1.35, cloudprovider/clusterapi/examples/
+# deployment.yaml), deliberately unmodified. CA's permission set is wide and
+# non-obvious -- it reads PDBs, CSI objects and every workload kind so it can
+# decide whether a node's pods could be rescheduled elsewhere -- and trimming it
+# by guesswork produces a scale-down that silently refuses to act.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler
+  namespace: cluster-autoscaler
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-workload
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+      - persistentvolumeclaims
+      - persistentvolumes
+      - pods
+      - replicationcontrollers
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods/eviction
+    verbs:
+      - create
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - csinodes
+      - storageclasses
+      - csidrivers
+      - csistoragecapacities
+      - volumeattachments
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+      - replicasets
+      - statefulsets
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+      - delete
+      - get
+      - update
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - get
+      - update
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-workload
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler-workload
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler
+    namespace: cluster-autoscaler
