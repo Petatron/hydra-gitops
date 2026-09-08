@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-time bootstrap: installs ArgoCD, then hands control to the root app-of-apps.
-# After this, all changes are driven by git commits to this repo.
+# Home cluster only. See README.md for cluster targeting and manual prerequisites.
 set -euo pipefail
 
 echo "=== 1/3: Install ArgoCD ==="
