@@ -83,6 +83,12 @@ spec:
             # leaving it on here would let CA drain this cluster's workers as
             # soon as it decided they were underutilised -- on the only cluster
             # Hydra has ever been proven to build.
+            #
+            # 1.35 logs this flag as deprecated when set to false, and offers no
+            # replacement -- the warning says only "will be removed in a future
+            # release". It still works. Recorded here so the intent is known
+            # when it does go: what is wanted is scale-down off entirely, not a
+            # particular flag.
             - --scale-down-enabled=false
             # Node-group discovery and capacity resolution are logged at V(4),
             # and PET-10's acceptance criteria are about exactly those lines.
