@@ -36,4 +36,9 @@ kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/st
 kubectl apply -f clusters/hydra-wl0/root-app.yaml
 ```
 
-Everything after that is driven by commits to this repo.
+These commands assume the current context is hydra-wl0 and Argo CD's namespace
+already exists; see the [root bootstrap instructions](../../README.md#bootstrap-and-manual-prerequisites)
+for commands with explicit contexts and the Cilium prerequisite.
+
+Argo CD then reconciles the Applications in this tree. Cluster Autoscaler still
+requires [manual management RBAC, credential setup, and node-group annotations](cluster-autoscaler/README.md#setup).
