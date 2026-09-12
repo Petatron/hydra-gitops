@@ -136,6 +136,10 @@ manifests. Applications under `clusters/<name>/` may reference only their own
 cluster tree or the shared `infrastructure/storage/` subtree. Home Applications
 under `apps/` and `bootstrap/` cannot reference `clusters/`. Resolved paths enforce
 these boundaries even through `..` or symlinks, including Kustomize output.
+Applications are forbidden in `infrastructure/` (including shared storage),
+`management-cluster/`, and other unclassified paths. These trees contain leaf
+resources, not additional reconciliation roots; the rule also covers Helm-only
+and generated Applications.
 Use explicit
 image tags (never `latest`) or SHA-256 digests, including embedded helper Pods.
 
@@ -163,6 +167,10 @@ Secret payloads, and tagless/`latest` images; and runs `kustomize build` for eve
 YAML/JSON embedded in ConfigMaps receive the same policy and schema checks.
 Unknown resource schemas fail validation. Empty ServiceAccount token Secret
 manifests are allowed because the API server fills their data outside Git.
+Here, "empty" means both `data` and `stringData` are omitted; even empty maps
+under those keys are rejected by the repository policy. Every `v1/List` item
+must have its own `apiVersion` and `kind`. Schema exemptions cover only supported
+Kustomization/Component configs in recognized build-entrypoint filenames.
 
 Run exactly the same validation locally (Python 3.9+; CI uses 3.12):
 

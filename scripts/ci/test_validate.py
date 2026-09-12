@@ -48,7 +48,7 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(expected, output)
 
     def test_valid_native_and_crd_resources(self):
-        self.write("app.yaml", app())
+        self.write("apps/test.yaml", app())
         self.write("pool.yaml", {"apiVersion": "metallb.io/v1beta1", "kind": "IPAddressPool",
                    "metadata": {"name": "test"}, "spec": {"addresses": ["192.0.2.1-192.0.2.5"]}})
         self.write("cilium.yaml", {"apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy",
@@ -114,7 +114,7 @@ data:
     def test_invalid_application_schema(self):
         resource = app()
         resource["spec"]["destination"] = 42
-        self.write("broken.yaml", resource)
+        self.write("apps/broken.yaml", resource)
         self.run_validation("Kubernetes schema validation failed")
 
     def test_unknown_schema_fails_closed(self):
@@ -137,17 +137,17 @@ data:
                 self.run_validation("Kubernetes schema validation failed")
 
     def test_missing_application_path(self):
-        self.write("app.yaml", app("typo"))
+        self.write("apps/test.yaml", app("typo"))
         self.run_validation("Application path is not an existing directory")
 
     def test_missing_multisource_path(self):
         resource = app()
         resource["spec"]["sources"] = [resource["spec"].pop("source"), app("missing")["spec"]["source"]]
-        self.write("app.yaml", resource)
+        self.write("apps/test.yaml", resource)
         self.run_validation("Application path is not an existing directory")
 
     def test_file_is_not_an_application_directory(self):
-        self.write("app.yaml", app("workloads/pod.yaml"))
+        self.write("apps/test.yaml", app("workloads/pod.yaml"))
         self.run_validation("Application path is not an existing directory")
 
     def test_git_source_must_be_this_repository(self):
@@ -156,7 +156,7 @@ data:
             with self.subTest(url=url):
                 resource = app()
                 resource["spec"]["source"]["repoURL"] = url
-                self.write("app.yaml", resource)
+                self.write("apps/test.yaml", resource)
                 self.run_validation("requires this repository's repoURL")
 
     def test_supported_self_repository_urls(self):
@@ -165,7 +165,7 @@ data:
             with self.subTest(url=url):
                 resource = app()
                 resource["spec"]["source"]["repoURL"] = url
-                self.write("app.yaml", resource)
+                self.write("apps/test.yaml", resource)
                 self.run_validation()
 
     def test_git_source_must_track_main(self):
@@ -173,7 +173,7 @@ data:
             with self.subTest(revision=revision):
                 resource = app()
                 resource["spec"]["source"]["targetRevision"] = revision
-                self.write("app.yaml", resource)
+                self.write("apps/test.yaml", resource)
                 self.run_validation("requires targetRevision: main")
 
     def test_multisource_repository_and_revision(self):
@@ -183,7 +183,7 @@ data:
                 other = app()["spec"]["source"]
                 other[field] = value
                 resource["spec"]["sources"] = [resource["spec"].pop("source"), other]
-                self.write("app.yaml", resource)
+                self.write("apps/test.yaml", resource)
                 self.run_validation("Git source path requires")
 
     def test_workload_cannot_reference_home_or_other_cluster(self):
@@ -193,6 +193,32 @@ data:
                 (self.root / target).mkdir(parents=True, exist_ok=True)
                 self.write("clusters/hydra-wl0/apps/bad.yaml", app(target))
                 self.run_validation("crosses cluster boundary")
+
+    def test_applications_in_unclassified_trees_are_rejected(self):
+        (self.root / "clusters/hydra-wl0/apps").mkdir(parents=True)
+        for origin in ["infrastructure/metallb", "infrastructure/storage", "other", ".",
+                       "clusters/hydra-wl0/management-cluster"]:
+            with self.subTest(origin=origin):
+                name = f"{origin}/unexpected.yaml"
+                self.write(name, app("clusters/hydra-wl0/apps"))
+                self.run_validation("Application is not allowed outside")
+                (self.root / name).unlink()
+
+    def test_unclassified_helm_application_is_rejected(self):
+        resource = app()
+        resource["spec"]["source"] = {"repoURL": "https://helm.cilium.io/", "chart": "cilium",
+                                      "targetRevision": "1.19.1"}
+        self.write("infrastructure/storage/unexpected.yaml", resource)
+        self.run_validation("Application is not allowed outside")
+
+    def test_rendered_application_in_shared_storage_is_rejected(self):
+        self.write("infrastructure/storage/pod.yaml", pod())
+        resource = app()
+        patch = [{"op": "replace", "path": f"/{key}", "value": resource[key]}
+                 for key in ["apiVersion", "kind", "spec"]]
+        self.write("infrastructure/storage/kustomization.yaml", {"resources": ["pod.yaml"], "patches": [
+            {"target": {"kind": "Pod", "name": "test"}, "patch": yaml.safe_dump(patch)}]})
+        self.run_validation("Application is not allowed outside")
 
     def test_home_cannot_reference_workload_cluster(self):
         (self.root / "clusters/hydra-wl0/apps").mkdir(parents=True)
@@ -225,18 +251,18 @@ data:
         self.run_validation("crosses cluster boundary")
 
     def test_path_escape(self):
-        self.write("app.yaml", app("../"))
+        self.write("apps/test.yaml", app("../"))
         self.run_validation("Application path escapes repository")
 
     def test_management_path(self):
         self.write("clusters/test/management-cluster/rbac.yaml", {"apiVersion": "v1", "kind": "Namespace",
                    "metadata": {"name": "management"}})
-        self.write("app.yaml", app("clusters/test/management-cluster"))
+        self.write("apps/test.yaml", app("clusters/test/management-cluster"))
         self.run_validation("must not reference management-cluster/")
 
     def test_management_ancestor(self):
         self.write("clusters/test/management-cluster/rbac.yaml", "")
-        self.write("app.yaml", app("clusters/test"))
+        self.write("apps/test.yaml", app("clusters/test"))
         self.run_validation("contains management-cluster/")
 
     def test_secret_anywhere_including_json_list(self):
@@ -252,6 +278,33 @@ data:
                    "annotations": {"kubernetes.io/service-account.name": "test"}},
                    "type": "kubernetes.io/service-account-token"})
         self.run_validation()
+
+    def test_secret_payload_keys_must_be_omitted_even_when_empty(self):
+        for field in ["data", "stringData"]:
+            with self.subTest(field=field):
+                self.write("token.yaml", {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "test",
+                           "annotations": {"kubernetes.io/service-account.name": "test"}},
+                           "type": "kubernetes.io/service-account-token", field: {}})
+                self.run_validation("Secret must not contain data or stringData")
+
+    def test_list_items_require_resource_identity(self):
+        for item in [{"kind": "Pod"}, {"apiVersion": "v1"}, {}, None, "not-an-object"]:
+            with self.subTest(item=item):
+                self.write("list.yaml", {"apiVersion": "v1", "kind": "List", "items": [item]})
+                self.run_validation("resource must have both apiVersion and kind")
+
+    def test_nested_list_items_require_resource_identity(self):
+        self.write("list.yaml", {"apiVersion": "v1", "kind": "List", "items": [
+            {"apiVersion": "v1", "kind": "List", "items": [{"kind": "Pod"}]}]})
+        self.run_validation("resource must have both apiVersion and kind")
+
+    def test_valid_list_resources_are_checked(self):
+        self.write("list.yaml", {"apiVersion": "v1", "kind": "List", "items": [pod()]})
+        self.run_validation()
+
+    def test_list_items_must_be_an_array(self):
+        self.write("list.yaml", {"apiVersion": "v1", "kind": "List", "items": {}})
+        self.run_validation("List.items must be an array")
 
     def test_floating_images(self):
         for image in ["busybox", "busybox:latest", "registry.example:5000/busybox"]:
@@ -281,7 +334,7 @@ data:
         resource["spec"]["source"] = {
             "repoURL": "https://helm.cilium.io/", "chart": "cilium", "targetRevision": "1.19.1",
             "helm": {"values": yaml.safe_dump(values)} if as_string else {"valuesObject": values}}
-        self.write("app.yaml", resource)
+        self.write("apps/test.yaml", resource)
 
     def test_helm_image_mapping_rejects_floating_tags(self):
         for tag in ["latest", "", None]:
@@ -312,6 +365,19 @@ data:
         self.helm_app({"image": {"repository": "example/app"}})
         self.run_validation("image repository override requires")
 
+    def test_helm_sibling_repository_override_needs_a_pin(self):
+        for as_string in [False, True]:
+            for override in [{"repository": "example/app"}, {"repository": "example/app", "digest": "bad"}]:
+                with self.subTest(as_string=as_string, override=override):
+                    self.helm_app({"controller": override}, as_string)
+                    self.run_validation("image repository override requires")
+
+    def test_pinned_helm_sibling_repository_overrides(self):
+        for pin in [{"tag": "1.2.3"}, {"imageTag": "1.2.3"}, {"digest": "sha256:" + "a" * 64}]:
+            with self.subTest(pin=pin):
+                self.helm_app({"controller": {"repository": "example/app", **pin}})
+                self.run_validation()
+
     def test_vm_image_objects_are_not_container_images(self):
         self.write("settings.yaml", {"image": {"url": "https://example.com/vm.qcow2", "checksum": "abc"}})
         self.run_validation()
@@ -319,6 +385,18 @@ data:
     def test_valid_kustomization(self):
         self.write("workloads/kustomization.yaml", {"resources": ["pod.yaml"]})
         self.run_validation()
+
+    def test_kustomize_group_does_not_exempt_other_resources(self):
+        for kind in ["Pod", "Unknown"]:
+            with self.subTest(kind=kind):
+                self.write("bad.yaml", {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": kind,
+                           "metadata": {"name": "test"}})
+                self.run_validation("Kubernetes schema validation failed")
+
+    def test_kustomization_outside_entrypoint_is_schema_checked(self):
+        self.write("bad.yaml", {"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
+                   "resources": 42})
+        self.run_validation("Kubernetes schema validation failed")
 
     def test_broken_kustomization(self):
         self.write("workloads/kustomization.yaml", {"resources": ["missing.yaml"]})

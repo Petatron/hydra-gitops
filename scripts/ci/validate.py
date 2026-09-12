@@ -92,6 +92,10 @@ def image_fields(value, label):
             raise Invalid(f"{label}: image tag/imageTag must be an explicit non-latest tag")
     elif isinstance(image, str) and not pinned_image(image):
         raise Invalid(f"{label}: image must have an explicit non-latest tag or sha256 digest")
+    if isinstance(value.get("repository"), str) and not tags:
+        digest = value.get("digest", "")
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-fA-F0-9]{64}", digest):
+            raise Invalid(f"{label}: image repository override requires a tag or sha256 digest")
     if isinstance(image, dict) and any(key in image for key in ("repository", "tag", "imageTag")):
         image_tags = [image[key] for key in ("tag", "imageTag") if key in image]
         digest = image.get("digest", "")
@@ -103,6 +107,11 @@ def image_fields(value, label):
 
 
 def application_paths(resource, root, label, origin):
+    workload = len(origin.parts) >= 2 and origin.parts[0] == "clusters" and (
+        len(origin.parts) >= 3 or (root / origin).is_dir())
+    home = bool(origin.parts) and origin.parts[0] in {"apps", "bootstrap"}
+    if not (workload or home) or "management-cluster" in origin.parts:
+        raise Invalid(f"{label}: Application is not allowed outside home/cluster Application trees")
     spec = resource.get("spec", {})
     sources = list(spec.get("sources") or [])
     if spec.get("source"):
@@ -132,20 +141,20 @@ def application_paths(resource, root, label, origin):
         if any(p.is_dir() for p in resolved.rglob("management-cluster")):
             raise Invalid(f"{label}: Application path contains management-cluster/")
         target = resolved.relative_to(root)
-        if len(origin.parts) >= 2 and origin.parts[0] == "clusters":
+        if workload:
             allowed = (Path(*origin.parts[:2]), *SHARED_PATHS)
             if not any(target.is_relative_to(prefix) for prefix in allowed):
                 raise Invalid(f"{label}: Application path crosses cluster boundary: {path}")
-        elif origin.parts and origin.parts[0] in {"apps", "bootstrap"}:
+        elif home:
             if target == Path(".") or target.is_relative_to("clusters"):
                 raise Invalid(f"{label}: home Application path crosses cluster boundary: {path}")
 
 
-def inspect_document(value, root, label, resources, origin):
-    if isinstance(value, dict) and ("kind" in value or "apiVersion" in value):
-        if not isinstance(value.get("kind"), str) or not isinstance(value.get("apiVersion"), str):
+def inspect_document(value, root, label, resources, origin, ancestors=None, require_identity=False):
+    if require_identity or isinstance(value, dict) and ("kind" in value or "apiVersion" in value):
+        if not isinstance(value, dict) or not isinstance(value.get("kind"), str) or not isinstance(value.get("apiVersion"), str):
             raise Invalid(f"{label}: resource must have both apiVersion and kind")
-    inspect(value, root, label, resources, origin)
+    inspect(value, root, label, resources, origin, ancestors)
 
 
 def inspect(value, root, label, resources, origin, ancestors=None):
@@ -166,11 +175,20 @@ def inspect(value, root, label, resources, origin, ancestors=None):
     if kind == "Application" and value.get("apiVersion", "").startswith("argoproj.io/"):
         application_paths(value, root, label, origin)
     image_fields(value, label)
-    is_kustomize = isinstance(api, str) and api.startswith("kustomize.config.k8s.io/")
+    is_kustomize = origin.name in KUSTOMIZATIONS and (api, kind) in (
+        ("kustomize.config.k8s.io/v1beta1", "Kustomization"),
+        ("kustomize.config.k8s.io/v1alpha1", "Component"),
+    )
     if isinstance(kind, str) and isinstance(api, str) and not is_kustomize and (api, kind) != ("v1", "List"):
         resources.append(value)
-    for child in value.values():
-        inspect(child, root, label, resources, origin, ancestors)
+    if (api, kind) == ("v1", "List"):
+        if not isinstance(value.get("items"), list):
+            raise Invalid(f"{label}: List.items must be an array of resources")
+        for item in value["items"]:
+            inspect_document(item, root, label, resources, origin, ancestors, require_identity=True)
+    for key, child in value.items():
+        if (api, kind) != ("v1", "List") or key != "items":
+            inspect(child, root, label, resources, origin, ancestors)
     if kind == "ConfigMap":
         for name, content in (value.get("data") or {}).items():
             if isinstance(content, str) and name.endswith((".yaml", ".yml", ".json")):
