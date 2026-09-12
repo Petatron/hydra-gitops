@@ -15,6 +15,10 @@ KUBERNETES_VERSION = "1.35.3"
 K8S_SCHEMAS = "07b64c5376535fbbd6fb9910621e1a41f7613c14"
 CRD_SCHEMAS = "866b2653a5334db9aed20ad74701e20fd464471b"
 KUSTOMIZATIONS = {"kustomization.yaml", "kustomization.yml", "Kustomization"}
+SHARED_PATHS = (Path("infrastructure/storage"),)
+SELF_REPOSITORY = re.compile(
+    r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)"
+    r"Petatron/hydra-gitops(?:\.git)?/?", re.IGNORECASE)
 
 
 class Invalid(ValueError):
@@ -22,15 +26,34 @@ class Invalid(ValueError):
 
 
 class UniqueLoader(yaml.SafeLoader):
-    """Fail on duplicate keys instead of silently accepting the last value."""
+    """Reject duplicate explicit keys while retaining YAML merge precedence."""
+
+    def flatten_mapping(self, node):
+        # Check before flattening: an explicit override of an inherited key is legal.
+        # Anchors can be flattened more than once, so inspect each original node once.
+        if not getattr(node, "keys_checked", False):
+            node.keys_checked = True
+            keys = set()
+            for key_node, _ in node.value:
+                key = "<<" if key_node.tag == "tag:yaml.org,2002:merge" else self.construct_object(key_node)
+                if key in keys:
+                    raise Invalid("duplicate YAML key")
+                keys.add(key)
+        super().flatten_mapping(node)
+
+
+# Kubernetes YAML treats date-like scalars as strings, not Python date objects.
+UniqueLoader.yaml_implicit_resolvers = {
+    key: [(tag, pattern) for tag, pattern in resolvers if tag != "tag:yaml.org,2002:timestamp"]
+    for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
 
 
 def unique_mapping(loader, node, deep=False):
+    loader.flatten_mapping(node)
     result = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
-        if key in result:
-            raise Invalid("duplicate YAML key")
         result[key] = loader.construct_object(value_node, deep=deep)
     return result
 
@@ -52,17 +75,49 @@ def pinned_image(image):
     if "@" in image:
         return bool(re.fullmatch(r"[^\s@]+@sha256:[a-fA-F0-9]{64}", image))
     name, separator, tag = image.rsplit("/", 1)[-1].partition(":")
-    return bool(name and separator and tag and tag.lower() != "latest")
+    return bool(name and separator and pinned_tag(tag))
 
 
-def application_paths(resource, root, label):
+def pinned_tag(tag):
+    return isinstance(tag, str) and tag.lower() != "latest" and bool(re.fullmatch(r"[\w][\w.-]{0,127}", tag, re.ASCII))
+
+
+def image_fields(value, label):
+    image = value.get("image")
+    tags = [value[key] for key in ("tag", "imageTag") if key in value]
+    # Common Helm shapes: image: {repository, tag/digest}, or image + imageTag.
+    # Do not classify Hydra's structured VM image (url/checksum) as a container image.
+    if tags and ("repository" in value or isinstance(image, str)):
+        if not all(pinned_tag(tag) for tag in tags):
+            raise Invalid(f"{label}: image tag/imageTag must be an explicit non-latest tag")
+    elif isinstance(image, str) and not pinned_image(image):
+        raise Invalid(f"{label}: image must have an explicit non-latest tag or sha256 digest")
+    if isinstance(image, dict) and any(key in image for key in ("repository", "tag", "imageTag")):
+        image_tags = [image[key] for key in ("tag", "imageTag") if key in image]
+        digest = image.get("digest", "")
+        if image_tags:
+            if not all(pinned_tag(tag) for tag in image_tags):
+                raise Invalid(f"{label}: image tag/imageTag must be an explicit non-latest tag")
+        elif not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-fA-F0-9]{64}", digest):
+            raise Invalid(f"{label}: image repository override requires a tag or sha256 digest")
+
+
+def application_paths(resource, root, label, origin):
     spec = resource.get("spec", {})
     sources = list(spec.get("sources") or [])
     if spec.get("source"):
         sources.append(spec["source"])
     for source in sources:
+        helm = source.get("helm") or {}
+        if isinstance(helm.get("values"), str):
+            for values in parse(helm["values"], f"{label}:helm.values"):
+                inspect(values, root, f"{label}:helm.values", [], origin)
         if "path" not in source:
             continue  # Helm chart sources and values-only refs have no local path.
+        if not isinstance(source.get("repoURL"), str) or not SELF_REPOSITORY.fullmatch(source["repoURL"]):
+            raise Invalid(f"{label}: Git source path requires this repository's repoURL")
+        if source.get("targetRevision") != "main":
+            raise Invalid(f"{label}: Git source path requires targetRevision: main")
         path = source["path"]
         if not isinstance(path, str) or not path:
             raise Invalid(f"{label}: Application path must be nonempty")
@@ -72,20 +127,28 @@ def application_paths(resource, root, label):
         if "management-cluster" in Path(path).parts or "management-cluster" in resolved.parts:
             raise Invalid(f"{label}: Application must not reference management-cluster/")
         if not resolved.is_dir():
-            raise Invalid(f"{label}: Application path does not exist: {path}")
+            raise Invalid(f"{label}: Application path is not an existing directory: {path}")
         # Also prevent pointing at an ancestor that could sweep management RBAC in.
         if any(p.is_dir() for p in resolved.rglob("management-cluster")):
             raise Invalid(f"{label}: Application path contains management-cluster/")
+        target = resolved.relative_to(root)
+        if len(origin.parts) >= 2 and origin.parts[0] == "clusters":
+            allowed = (Path(*origin.parts[:2]), *SHARED_PATHS)
+            if not any(target.is_relative_to(prefix) for prefix in allowed):
+                raise Invalid(f"{label}: Application path crosses cluster boundary: {path}")
+        elif origin.parts and origin.parts[0] in {"apps", "bootstrap"}:
+            if target == Path(".") or target.is_relative_to("clusters"):
+                raise Invalid(f"{label}: home Application path crosses cluster boundary: {path}")
 
 
-def inspect_document(value, root, label, resources):
+def inspect_document(value, root, label, resources, origin):
     if isinstance(value, dict) and ("kind" in value or "apiVersion" in value):
         if not isinstance(value.get("kind"), str) or not isinstance(value.get("apiVersion"), str):
             raise Invalid(f"{label}: resource must have both apiVersion and kind")
-    inspect(value, root, label, resources)
+    inspect(value, root, label, resources, origin)
 
 
-def inspect(value, root, label, resources, ancestors=None):
+def inspect(value, root, label, resources, origin, ancestors=None):
     ancestors = set() if ancestors is None else ancestors
     if not isinstance(value, (dict, list)):
         return
@@ -94,26 +157,25 @@ def inspect(value, root, label, resources, ancestors=None):
     ancestors = ancestors | {id(value)}
     if isinstance(value, list):
         for item in value:
-            inspect(item, root, label, resources, ancestors)
+            inspect(item, root, label, resources, origin, ancestors)
         return
     kind = value.get("kind")
     api = value.get("apiVersion")
     if kind == "Secret" and ("data" in value or "stringData" in value):
         raise Invalid(f"{label}: Secret must not contain data or stringData")
     if kind == "Application" and value.get("apiVersion", "").startswith("argoproj.io/"):
-        application_paths(value, root, label)
-    if "image" in value and isinstance(value["image"], str) and not pinned_image(value["image"]):
-        raise Invalid(f"{label}: image must have an explicit non-latest tag or sha256 digest")
+        application_paths(value, root, label, origin)
+    image_fields(value, label)
     is_kustomize = isinstance(api, str) and api.startswith("kustomize.config.k8s.io/")
     if isinstance(kind, str) and isinstance(api, str) and not is_kustomize and (api, kind) != ("v1", "List"):
         resources.append(value)
     for child in value.values():
-        inspect(child, root, label, resources, ancestors)
+        inspect(child, root, label, resources, origin, ancestors)
     if kind == "ConfigMap":
         for name, content in (value.get("data") or {}).items():
             if isinstance(content, str) and name.endswith((".yaml", ".yml", ".json")):
                 for embedded in parse(content, f"{label}:{name}"):
-                    inspect_document(embedded, root, f"{label}:{name}", resources)
+                    inspect_document(embedded, root, f"{label}:{name}", resources, origin)
 
 
 def schema_validate(resources, label):
@@ -154,7 +216,7 @@ def validate(root):
         label = str(path.relative_to(root))
         resources = []
         for document in parse(path.read_text(), label):
-            inspect_document(document, root, label, resources)
+            inspect_document(document, root, label, resources, path.relative_to(root))
         schema_validate(resources, label)
         if path.name in KUSTOMIZATIONS:
             builds.add(path.parent)
@@ -165,7 +227,7 @@ def validate(root):
             raise Invalid(f"{label}: failed\n{result.stderr}")
         resources = []
         for document in parse(result.stdout, label):
-            inspect_document(document, root, label, resources)
+            inspect_document(document, root, label, resources, directory.relative_to(root))
         schema_validate(resources, label)
     print(f"GitOps validation passed; built {len(builds)} Kustomize directories.")
 

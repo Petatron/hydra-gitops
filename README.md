@@ -131,7 +131,12 @@ kubectl --context <cluster> -n argocd port-forward svc/argocd-server 8080:443
 Create a branch and PR. Add or edit an Application under the intended cluster's
 `apps/` tree, use an explicit chart version for new Applications, and edit
 `helm.valuesObject` for chart settings. Git-backed source paths must exist in
-this repository and cannot include management-cluster manifests. Use explicit
+this repository on `targetRevision: main` and cannot include management-cluster
+manifests. Applications under `clusters/<name>/` may reference only their own
+cluster tree or the shared `infrastructure/storage/` subtree. Home Applications
+under `apps/` and `bootstrap/` cannot reference `clusters/`. Resolved paths enforce
+these boundaries even through `..` or symlinks, including Kustomize output.
+Use explicit
 image tags (never `latest`) or SHA-256 digests, including embedded helper Pods.
 
 The [PR template](.github/pull_request_template.md) records the target cluster,
@@ -148,9 +153,11 @@ revert PR, and handle any manual prerequisites in the named cluster separately.
 check that never starts. The workflow has read-only repository permissions and
 needs no cluster credentials.
 
-It parses repository YAML/JSON with duplicate-key rejection; validates Kubernetes
+It parses repository YAML/JSON with duplicate-key rejection (YAML merge keys and
+explicit inherited-key overrides are supported; date-like scalars stay strings); validates Kubernetes
 resources against **1.35.3** schemas and pinned CRD schemas; verifies Application
-paths (including multi-source Applications); rejects management-cluster paths,
+paths, repository identity, branch, and cluster boundaries (including multi-source
+Applications); rejects management-cluster paths,
 Secret payloads, and tagless/`latest` images; and runs `kustomize build` for every
 `kustomization.yaml`, `kustomization.yml`, or `Kustomization`. Rendered output and
 YAML/JSON embedded in ConfigMaps receive the same policy and schema checks.
@@ -171,12 +178,24 @@ python scripts/ci/validate.py
 
 Tests create temporary repositories and prove each required rule fails on broken
 input, including generated Secrets and images changed by Kustomize. Tool and
-schema downloads require internet access. See [schema provenance and update
+schema downloads require internet access. Release archives are checked against
+[committed SHA-256 hashes](scripts/ci/tool-checksums.txt), not newly downloaded
+checksums. When updating tool versions, review the upstream release checksums
+and update the installer and hashes together for Linux/macOS amd64/arm64.
+See [schema provenance and update
 instructions](schemas/README.md).
+
+Image checks cover container `image` strings and common explicit Helm overrides
+in `valuesObject` and inline `values`: `image: {repository, tag/digest}`, tag-only
+`image` maps, and sibling `image`/`repository` plus `tag`/`imageTag`. Explicit
+repository overrides need a tag or SHA-256 digest; empty and `latest` tags fail.
+Structured Hydra VM images are not treated as container images.
 
 CI validates checked-in manifests and Kustomize output. It does not render the
 external Helm charts, evaluate Kubernetes CEL/admission rules, or prove runtime
-behaviour such as RBAC sufficiency or network reachability. Cluster API kinds
+behaviour such as RBAC sufficiency or network reachability. Omitted chart defaults,
+chart-specific image keys, Helm parameters, and external values files are not
+evaluated by these image heuristics. Cluster API kinds
 named in RBAC rules are strings, not custom resources to schema-validate.
 
 Repository settings on `main` require **GitOps validation** from GitHub Actions,
