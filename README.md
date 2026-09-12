@@ -135,7 +135,9 @@ this repository on `targetRevision: main` and cannot include management-cluster
 manifests. Applications under `clusters/<name>/` may reference only their own
 cluster tree or the shared `infrastructure/storage/` subtree. Home Applications
 under `apps/` and `bootstrap/` cannot reference `clusters/`. Resolved paths enforce
-these boundaries even through `..` or symlinks, including Kustomize output.
+these boundaries through `..`, including Kustomize output. Repository symlinks
+are rejected, including in-repository, extensionless, directory, and dangling
+links: watched paths must not alias manual-only management resources.
 Applications are forbidden in `infrastructure/` (including shared storage),
 `management-cluster/`, and other unclassified paths. These trees contain leaf
 resources, not additional reconciliation roots; the rule also covers Helm-only
@@ -197,6 +199,8 @@ Image checks cover container `image` strings and common explicit Helm overrides
 in `valuesObject` and inline `values`: `image: {repository, tag/digest}`, tag-only
 `image` maps, and sibling `image`/`repository` plus `tag`/`imageTag`. Explicit
 repository overrides need a tag or SHA-256 digest; empty and `latest` tags fail.
+SHA-256 image digests require exactly 64 lowercase hexadecimal characters,
+including explicit Helm digests supplied alongside a tag.
 Structured Hydra VM images are not treated as container images.
 
 CI validates checked-in manifests and Kustomize output. It does not render the

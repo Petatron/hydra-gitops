@@ -34,5 +34,7 @@ Run the acceptance tests and full repository validation after any schema update.
 No `-ignore-missing-schemas` flag is used: introducing an uncatalogued kind
 requires adding its real upstream schema. Catalog snapshots are structural
 validation coverage, not assertions that those controller versions are installed.
-The tests exercise Argo, Cilium, MetalLB, CAPI v1beta2, and Hydra v1alpha1 schemas.
+The tests exercise Argo, Cilium, MetalLB, CAPI v1beta2, and all three Hydra v1alpha1
+schemas (HydraCluster, HydraMachine, and HydraMachineTemplate) with valid and
+invalid resources.
 Kubeconform does not evaluate CRD CEL or controller-side admission checks.

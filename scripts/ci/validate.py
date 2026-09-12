@@ -73,7 +73,8 @@ def pinned_image(image):
     if not isinstance(image, str):
         return False
     if "@" in image:
-        return bool(re.fullmatch(r"[^\s@]+@sha256:[a-fA-F0-9]{64}", image))
+        name, _, digest = image.partition("@")
+        return bool(re.fullmatch(r"[^\s@]+", name)) and pinned_digest(digest)
     name, separator, tag = image.rsplit("/", 1)[-1].partition(":")
     return bool(name and separator and pinned_tag(tag))
 
@@ -82,9 +83,15 @@ def pinned_tag(tag):
     return isinstance(tag, str) and tag.lower() != "latest" and bool(re.fullmatch(r"[\w][\w.-]{0,127}", tag, re.ASCII))
 
 
+def pinned_digest(digest):
+    return isinstance(digest, str) and bool(re.fullmatch(r"sha256:[a-f0-9]{64}", digest))
+
+
 def image_fields(value, label):
     image = value.get("image")
     tags = [value[key] for key in ("tag", "imageTag") if key in value]
+    if value.get("digest") and ("repository" in value or isinstance(image, str)) and not pinned_digest(value["digest"]):
+        raise Invalid(f"{label}: image digest must be lowercase SHA-256 hexadecimal")
     # Common Helm shapes: image: {repository, tag/digest}, or image + imageTag.
     # Do not classify Hydra's structured VM image (url/checksum) as a container image.
     if tags and ("repository" in value or isinstance(image, str)):
@@ -94,15 +101,17 @@ def image_fields(value, label):
         raise Invalid(f"{label}: image must have an explicit non-latest tag or sha256 digest")
     if isinstance(value.get("repository"), str) and not tags:
         digest = value.get("digest", "")
-        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-fA-F0-9]{64}", digest):
+        if not pinned_digest(digest):
             raise Invalid(f"{label}: image repository override requires a tag or sha256 digest")
     if isinstance(image, dict) and any(key in image for key in ("repository", "tag", "imageTag")):
         image_tags = [image[key] for key in ("tag", "imageTag") if key in image]
         digest = image.get("digest", "")
+        if digest and not pinned_digest(digest):
+            raise Invalid(f"{label}: image digest must be lowercase SHA-256 hexadecimal")
         if image_tags:
             if not all(pinned_tag(tag) for tag in image_tags):
                 raise Invalid(f"{label}: image tag/imageTag must be an explicit non-latest tag")
-        elif not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-fA-F0-9]{64}", digest):
+        elif not pinned_digest(digest):
             raise Invalid(f"{label}: image repository override requires a tag or sha256 digest")
 
 
@@ -133,14 +142,14 @@ def application_paths(resource, root, label, origin):
         resolved = (root / path).resolve()
         if Path(path).is_absolute() or not resolved.is_relative_to(root):
             raise Invalid(f"{label}: Application path escapes repository")
-        if "management-cluster" in Path(path).parts or "management-cluster" in resolved.parts:
+        target = resolved.relative_to(root)
+        if "management-cluster" in Path(path).parts or "management-cluster" in target.parts:
             raise Invalid(f"{label}: Application must not reference management-cluster/")
         if not resolved.is_dir():
             raise Invalid(f"{label}: Application path is not an existing directory: {path}")
         # Also prevent pointing at an ancestor that could sweep management RBAC in.
         if any(p.is_dir() for p in resolved.rglob("management-cluster")):
             raise Invalid(f"{label}: Application path contains management-cluster/")
-        target = resolved.relative_to(root)
         if workload:
             allowed = (Path(*origin.parts[:2]), *SHARED_PATHS)
             if not any(target.is_relative_to(prefix) for prefix in allowed):
@@ -225,6 +234,10 @@ def validate(root):
     paths = sorted({root / name for name in result.stdout.split("\0") if name})
     builds = set()
     for path in paths:
+        # Check before exists(): dangling links otherwise look like deleted files.
+        # Directory/extensionless links can also be consumed by Argo or Kustomize.
+        if path.is_symlink():
+            raise Invalid(f"{path.relative_to(root)}: repository symlinks are not allowed")
         if not path.exists():  # locally deleted, not staged yet
             continue
         if path.name not in KUSTOMIZATIONS and path.suffix.lower() not in {".yaml", ".yml", ".json"}:

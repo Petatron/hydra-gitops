@@ -61,6 +61,21 @@ class ValidationTests(unittest.TestCase):
                    "spec": {"controlPlaneEndpoint": {"host": "192.0.2.10", "port": 6443}}})
         self.run_validation()
 
+    def test_valid_hydra_machine_schemas(self):
+        machine = {"vcpus": 2, "memory": "1Gi", "diskSize": "10Gi"}
+        for kind, spec in [("HydraMachine", machine), ("HydraMachineTemplate", {"template": {"spec": machine}})]:
+            self.write(f"{kind}.yaml", {"apiVersion": "infrastructure.cluster.x-k8s.io/v1alpha1",
+                       "kind": kind, "metadata": {"name": "test"}, "spec": spec})
+        self.run_validation()
+
+    def test_invalid_hydra_machine_schemas(self):
+        machine = {"vcpus": "invalid", "memory": "1Gi", "diskSize": "10Gi"}
+        for kind, spec in [("HydraMachine", machine), ("HydraMachineTemplate", {"template": {"spec": machine}})]:
+            with self.subTest(kind=kind):
+                self.write("invalid-hydra.yaml", {"apiVersion": "infrastructure.cluster.x-k8s.io/v1alpha1",
+                           "kind": kind, "metadata": {"name": "test"}, "spec": spec})
+                self.run_validation("Kubernetes schema validation failed")
+
     def test_invalid_yaml(self):
         self.write("broken.yaml", "spec: [unterminated")
         self.run_validation("YAML parse failed")
@@ -240,7 +255,36 @@ data:
         (self.root / "clusters/hydra-wl0").mkdir(parents=True)
         (self.root / "clusters/hydra-wl0/alias").symlink_to(self.root / "apps", target_is_directory=True)
         self.write("clusters/hydra-wl0/root-app.yaml", app("clusters/hydra-wl0/alias"))
-        self.run_validation("crosses cluster boundary")
+        self.run_validation("repository symlinks are not allowed")
+
+    def test_manifest_symlinks_cannot_import_management_resources(self):
+        self.write("clusters/hydra-wl0/management-cluster/rbac.yaml", {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+            "metadata": {"name": "management-only"}, "rules": []})
+        directory = self.root / "infrastructure/storage"
+        directory.mkdir(parents=True)
+        for name in ["rbac.yaml", "rbac.yml", "rbac.json", "Kustomization", "extensionless"]:
+            with self.subTest(name=name):
+                link = directory / name
+                link.symlink_to("../../clusters/hydra-wl0/management-cluster/rbac.yaml")
+                subprocess.run(["git", "add", str(link)], cwd=self.root, check=True)
+                self.run_validation("repository symlinks are not allowed")
+                link.unlink()
+
+    def test_dangling_manifest_symlink_is_rejected(self):
+        link = self.root / "broken.yaml"
+        link.symlink_to("missing.yaml")
+        subprocess.run(["git", "add", str(link)], cwd=self.root, check=True)
+        self.run_validation("repository symlinks are not allowed")
+
+    def test_management_named_checkout_parent_is_allowed(self):
+        checkout = self.root / "management-cluster/checkout"
+        checkout.mkdir(parents=True)
+        for name in [".git", "workloads"]:
+            (self.root / name).rename(checkout / name)
+        self.root = checkout
+        self.write("apps/test.yaml", app())
+        self.run_validation()
 
     def test_rendered_application_keeps_cluster_scope(self):
         (self.root / "apps").mkdir()
@@ -324,6 +368,22 @@ data:
         self.write("digest.yaml", pod("busybox@sha256:" + "a" * 64))
         self.run_validation()
 
+    def test_noncanonical_image_digests_are_rejected(self):
+        for digest in ["A" * 64, "a" * 63 + "F"]:
+            with self.subTest(digest=digest):
+                self.write("digest.yaml", pod("busybox@sha256:" + digest))
+                self.run_validation("image must have an explicit")
+
+    def test_noncanonical_helm_digests_are_rejected(self):
+        for as_string in [False, True]:
+            for pin in [{"digest": "sha256:" + "A" * 64},
+                        {"digest": "sha256:" + "a" * 63 + "F", "tag": "1.2.3"}]:
+                for nested in [False, True]:
+                    with self.subTest(as_string=as_string, pin=pin, nested=nested):
+                        value = {"repository": "example/app", **pin}
+                        self.helm_app({"image": value} if nested else value, as_string)
+                        self.run_validation("image digest must be lowercase")
+
     def test_embedded_helper_pod(self):
         self.write("config.yaml", {"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "test"},
                    "data": {"helperPod.yaml": yaml.safe_dump(pod("busybox"))}})
@@ -370,7 +430,8 @@ data:
             for override in [{"repository": "example/app"}, {"repository": "example/app", "digest": "bad"}]:
                 with self.subTest(as_string=as_string, override=override):
                     self.helm_app({"controller": override}, as_string)
-                    self.run_validation("image repository override requires")
+                    expected = "image digest must be lowercase" if "digest" in override else "image repository override requires"
+                    self.run_validation(expected)
 
     def test_pinned_helm_sibling_repository_overrides(self):
         for pin in [{"tag": "1.2.3"}, {"imageTag": "1.2.3"}, {"digest": "sha256:" + "a" * 64}]:
