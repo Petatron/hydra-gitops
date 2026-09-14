@@ -87,8 +87,12 @@ def pinned_digest(digest):
     return isinstance(digest, str) and bool(re.fullmatch(r"sha256:[a-f0-9]{64}", digest))
 
 
-def image_fields(value, label):
+def image_fields(value, label, helm_values=False):
     image = value.get("image")
+    if not helm_values:
+        if isinstance(image, str) and not pinned_image(image):
+            raise Invalid(f"{label}: image must have an explicit non-latest tag or sha256 digest")
+        return
     tags = [value[key] for key in ("tag", "imageTag") if key in value]
     if value.get("digest") and ("repository" in value or isinstance(image, str)) and not pinned_digest(value["digest"]):
         raise Invalid(f"{label}: image digest must be lowercase SHA-256 hexadecimal")
@@ -129,7 +133,7 @@ def application_paths(resource, root, label, origin):
         helm = source.get("helm") or {}
         if isinstance(helm.get("values"), str):
             for values in parse(helm["values"], f"{label}:helm.values"):
-                inspect(values, root, f"{label}:helm.values", [], origin)
+                inspect(values, root, f"{label}:helm.values", [], origin, helm_values=True)
         if "path" not in source:
             continue  # Helm chart sources and values-only refs have no local path.
         if not isinstance(source.get("repoURL"), str) or not SELF_REPOSITORY.fullmatch(source["repoURL"]):
@@ -163,10 +167,21 @@ def inspect_document(value, root, label, resources, origin, ancestors=None, requ
     if require_identity or isinstance(value, dict) and ("kind" in value or "apiVersion" in value):
         if not isinstance(value, dict) or not isinstance(value.get("kind"), str) or not isinstance(value.get("apiVersion"), str):
             raise Invalid(f"{label}: resource must have both apiVersion and kind")
+    # Only complete documents/List items enter the schema validator. Nested object
+    # references are validated as fields of their containing resource.
+    if isinstance(value, dict):
+        kind, api = value.get("kind"), value.get("apiVersion")
+        is_kustomize = origin.name in KUSTOMIZATIONS and (api, kind) in (
+            ("kustomize.config.k8s.io/v1beta1", "Kustomization"),
+            ("kustomize.config.k8s.io/v1alpha1", "Component"),
+        )
+        if isinstance(kind, str) and isinstance(api, str) and not is_kustomize and (api, kind) != ("v1", "List"):
+            resources.append(value)
     inspect(value, root, label, resources, origin, ancestors)
 
 
-def inspect(value, root, label, resources, origin, ancestors=None):
+def inspect(value, root, label, resources, origin, ancestors=None, helm_values=False, helm_roots=frozenset()):
+    helm_values = helm_values or id(value) in helm_roots
     ancestors = set() if ancestors is None else ancestors
     if not isinstance(value, (dict, list)):
         return
@@ -175,7 +190,7 @@ def inspect(value, root, label, resources, origin, ancestors=None):
     ancestors = ancestors | {id(value)}
     if isinstance(value, list):
         for item in value:
-            inspect(item, root, label, resources, origin, ancestors)
+            inspect(item, root, label, resources, origin, ancestors, helm_values, helm_roots)
         return
     kind = value.get("kind")
     api = value.get("apiVersion")
@@ -183,13 +198,15 @@ def inspect(value, root, label, resources, origin, ancestors=None):
         raise Invalid(f"{label}: Secret must not contain data or stringData")
     if kind == "Application" and value.get("apiVersion", "").startswith("argoproj.io/"):
         application_paths(value, root, label, origin)
-    image_fields(value, label)
-    is_kustomize = origin.name in KUSTOMIZATIONS and (api, kind) in (
-        ("kustomize.config.k8s.io/v1beta1", "Kustomization"),
-        ("kustomize.config.k8s.io/v1alpha1", "Component"),
-    )
-    if isinstance(kind, str) and isinstance(api, str) and not is_kustomize and (api, kind) != ("v1", "List"):
-        resources.append(value)
+        spec = value.get("spec", {})
+        sources = [spec.get("source") or {}, *(spec.get("sources") or [])]
+        # Carry the exact Application values roots through recursive traversal;
+        # unrelated repository/tag/digest keys are not Helm image overrides.
+        helm_roots = helm_roots | {
+            id(source["helm"]["valuesObject"]) for source in sources
+            if isinstance(source.get("helm"), dict) and "valuesObject" in source["helm"]
+        }
+    image_fields(value, label, helm_values)
     if (api, kind) == ("v1", "List"):
         if not isinstance(value.get("items"), list):
             raise Invalid(f"{label}: List.items must be an array of resources")
@@ -197,7 +214,7 @@ def inspect(value, root, label, resources, origin, ancestors=None):
             inspect_document(item, root, label, resources, origin, ancestors, require_identity=True)
     for key, child in value.items():
         if (api, kind) != ("v1", "List") or key != "items":
-            inspect(child, root, label, resources, origin, ancestors)
+            inspect(child, root, label, resources, origin, ancestors, helm_values, helm_roots)
     if kind == "ConfigMap":
         for name, content in (value.get("data") or {}).items():
             if isinstance(content, str) and name.endswith((".yaml", ".yml", ".json")):

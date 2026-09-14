@@ -47,6 +47,47 @@ class ValidationTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, output)
             self.assertIn(expected, output)
 
+    def test_non_image_repository_fields_are_allowed(self):
+        for extra in [{}, {"tag": "latest"}, {"digest": "not-an-image-digest"}]:
+            with self.subTest(extra=extra):
+                self.write("config.yaml", {"apiVersion": "v1", "kind": "ConfigMap",
+                           "metadata": {"name": "config"},
+                           "data": {"repository": "https://github.com/example/config", **extra}})
+                self.run_validation()
+
+    def test_nested_object_references_are_not_resources(self):
+        self.write("hpa.yaml", {"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
+                   "metadata": {"name": "test"}, "spec": {
+                       "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": "test"},
+                       "minReplicas": 1, "maxReplicas": 3}})
+        self.run_validation()
+
+    def test_nested_references_still_use_parent_schema(self):
+        self.write("hpa.yaml", {"apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
+                   "metadata": {"name": "test"}, "spec": {
+                       "scaleTargetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": 123},
+                       "maxReplicas": 3}})
+        self.run_validation("Kubernetes schema validation failed")
+
+    def test_container_tags_cannot_override_unpinned_image(self):
+        resource = pod("busybox")
+        resource["spec"]["containers"][0]["tag"] = "1.37.0"
+        self.write("workloads/pod.yaml", resource)
+        self.run_validation("image must have an explicit")
+
+    def test_multisource_helm_repository_context(self):
+        resource = app()
+        source = resource["spec"].pop("source")
+        source.pop("path")
+        source["chart"] = "example"
+        source["helm"] = {"valuesObject": {"controller": {"repository": "example/app"}}}
+        resource["spec"]["sources"] = [source]
+        self.write("apps/test.yaml", resource)
+        self.run_validation("image repository override requires")
+        source["helm"]["valuesObject"]["controller"]["tag"] = "1.2.3"
+        self.write("apps/test.yaml", resource)
+        self.run_validation()
+
     def test_valid_native_and_crd_resources(self):
         self.write("apps/test.yaml", app())
         self.write("pool.yaml", {"apiVersion": "metallb.io/v1beta1", "kind": "IPAddressPool",

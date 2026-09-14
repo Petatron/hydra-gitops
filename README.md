@@ -167,6 +167,8 @@ Applications); rejects management-cluster paths,
 Secret payloads, and tagless/`latest` images; and runs `kustomize build` for every
 `kustomization.yaml`, `kustomization.yml`, or `Kustomization`. Rendered output and
 YAML/JSON embedded in ConfigMaps receive the same policy and schema checks.
+Schema validation collects document roots and `List.items`, not nested object
+references such as an HPA `scaleTargetRef`; the parent schema validates those fields.
 Unknown resource schemas fail validation. Empty ServiceAccount token Secret
 manifests are allowed because the API server fills their data outside Git.
 Here, "empty" means both `data` and `stringData` are omitted; even empty maps
@@ -198,10 +200,11 @@ instructions](schemas/README.md).
 Image checks cover container `image` strings and common explicit Helm overrides
 in `valuesObject` and inline `values`: `image: {repository, tag/digest}`, tag-only
 `image` maps, and sibling `image`/`repository` plus `tag`/`imageTag`. Explicit
-repository overrides need a tag or SHA-256 digest; empty and `latest` tags fail.
+repository overrides within those Helm values need a tag or SHA-256 digest; empty and `latest` tags fail.
 SHA-256 image digests require exactly 64 lowercase hexadecimal characters,
 including explicit Helm digests supplied alongside a tag.
-Structured Hydra VM images are not treated as container images.
+Ordinary `repository`, `tag`, and `digest` fields outside Helm values are not image
+overrides. Structured Hydra VM images are not treated as container images.
 
 CI validates checked-in manifests and Kustomize output. It does not render the
 external Helm charts, evaluate Kubernetes CEL/admission rules, or prove runtime
