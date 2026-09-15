@@ -1,0 +1,336 @@
+{
+  "description": "HydraMachineTemplate is the Schema for the hydramachinetemplates API",
+  "properties": {
+    "apiVersion": {
+      "description": "APIVersion defines the versioned schema of this representation of an object.\nServers should convert recognized schemas to the latest internal value, and\nmay reject unrecognized values.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Kind is a string value representing the REST resource this object represents.\nServers may infer this from the endpoint the client submits requests to.\nCannot be updated.\nIn CamelCase.\nMore info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds",
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "spec": {
+      "description": "spec defines the desired state of HydraMachineTemplate",
+      "properties": {
+        "template": {
+          "description": "template is the machine payload cloned into each HydraMachine.",
+          "properties": {
+            "metadata": {
+              "description": "metadata is the object metadata applied to machines cloned from this\ntemplate.",
+              "minProperties": 1,
+              "properties": {
+                "annotations": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "annotations is an unstructured key value map stored with a resource that may be\nset by external tools to store and retrieve arbitrary metadata. They are not\nqueryable and should be preserved when modifying objects.\nMore info: http://kubernetes.io/docs/user-guide/annotations",
+                  "type": "object"
+                },
+                "labels": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "labels is a map of string keys and values that can be used to organize and categorize\n(scope and select) objects. May match selectors of replication controllers\nand services.\nMore info: http://kubernetes.io/docs/user-guide/labels",
+                  "type": "object"
+                }
+              },
+              "type": "object",
+              "additionalProperties": false
+            },
+            "spec": {
+              "description": "spec is the HydraMachine spec applied to machines cloned from this\ntemplate.\n\nproviderID must not be set here. It identifies one specific machine, and a\ntemplate describes many; a value here would be copied into every clone and\ncollide immediately.",
+              "properties": {
+                "diskSize": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ],
+                  "description": "diskSize is the size of the machine's root disk, as a Kubernetes quantity,\nfor example \"40Gi\". Must be greater than zero, for the same reason as\nmemory.",
+                  "pattern": "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$",
+                  "x-kubernetes-int-or-string": true,
+                  "x-kubernetes-validations": [
+                    {
+                      "message": "diskSize is immutable; replace the machine instead",
+                      "rule": "self == oldSelf"
+                    },
+                    {
+                      "message": "diskSize must be greater than zero",
+                      "rule": "quantity(self).isGreaterThan(quantity('0'))"
+                    }
+                  ]
+                },
+                "image": {
+                  "description": "image is the base image the machine boots from.\n\nOptional since the owning HydraCluster can supply a default. Omitting it\nresolves in order: this field, then the cluster's baseImage, then the\nmanager's --libvirt-base-image flag. It is only an error when all three are\nempty.\n\nFixed when the machine is created, and that includes whether it is set at\nall. Adding one later would be admitted while changing nothing: the VM was\nalready built from whatever this resolved to, and the reconciler only\nre-reads a machine once its providerID exists -- so the object would claim\nan image the running VM does not have. Cluster API replaces machines rather\nthan mutating them, which is the model this follows.\n\nExpressed on the spec rather than the field, because a field-level\ntransition rule cannot describe presence changing for an optional value.",
+                  "properties": {
+                    "checksum": {
+                      "description": "checksum verifies a fetched image, in the form \"<algorithm>:<hex>\".\n\nThe digest length is pinned to the algorithm -- 64 hex characters for\nsha256, 128 for sha512 -- so a truncated or malformed digest is rejected at\nadmission rather than discovered halfway through provisioning a machine.\n\nOnly valid alongside url; a checksum with nothing to verify is rejected.",
+                      "pattern": "^(sha256:[a-fA-F0-9]{64}|sha512:[a-fA-F0-9]{128})$",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "name identifies a base image already known to the backend.",
+                      "maxLength": 253,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "url is where the backend may fetch the image from when it does not already\nhold one matching name.",
+                      "maxLength": 2048,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "type": "object",
+                  "x-kubernetes-validations": [
+                    {
+                      "message": "one of name or url must be set",
+                      "rule": "has(self.name) || has(self.url)"
+                    },
+                    {
+                      "message": "checksum is only meaningful alongside url",
+                      "rule": "!has(self.checksum) || has(self.url)"
+                    }
+                  ],
+                  "additionalProperties": false
+                },
+                "memory": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ],
+                  "description": "memory is the RAM the machine is given, as a Kubernetes quantity, for\nexample \"8Gi\". Must be greater than zero -- a zero or negative value would\notherwise reach libvirt as domain XML, and because this field is immutable\nthe resulting object could never be corrected, only deleted.",
+                  "pattern": "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$",
+                  "x-kubernetes-int-or-string": true,
+                  "x-kubernetes-validations": [
+                    {
+                      "message": "memory is immutable; replace the machine instead",
+                      "rule": "self == oldSelf"
+                    },
+                    {
+                      "message": "memory must be greater than zero",
+                      "rule": "quantity(self).isGreaterThan(quantity('0'))"
+                    }
+                  ]
+                },
+                "networks": {
+                  "description": "networks are the backend networks this machine attaches to, in order. The\nfirst attachment provides the machine's primary address.\n\nA list rather than a single value so that multi-homed machines do not\nrequire an API break later.\n\nOptional for the same reason as image: the owning HydraCluster can supply\ndefaults. Unlike image there is no manager-flag fallback, and a machine\nthat resolves to no networks is refused -- it would boot, satisfy the\nbackend, and never reach an API server.",
+                  "items": {
+                    "description": "HydraNetworkAttachment attaches a machine to one backend network.",
+                    "properties": {
+                      "name": {
+                        "description": "name is the backend network or bridge to attach to, for example \"br0\".\nHydra does not interpret this value; it is passed to the backend, which\ndecides what it means.",
+                        "maxLength": 253,
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ],
+                    "type": "object",
+                    "additionalProperties": false
+                  },
+                  "maxItems": 8,
+                  "minItems": 1,
+                  "type": "array",
+                  "x-kubernetes-list-map-keys": [
+                    "name"
+                  ],
+                  "x-kubernetes-list-type": "map"
+                },
+                "providerID": {
+                  "description": "providerID is the unique identifier for this machine, in the form\nhydra://<backend>/<id>. The controller sets it once the backing\ninfrastructure exists; the Kubernetes Node reports the same value, which is\nhow Cluster API pairs a Machine with its Node.\n\nThis is written by the controller, not by users. It is immutable once set.\n\nNOTE: this field is part of the Cluster API contract.",
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "vcpus": {
+                  "description": "vcpus is the number of virtual CPUs the machine is given.",
+                  "format": "int32",
+                  "minimum": 1,
+                  "type": "integer",
+                  "x-kubernetes-validations": [
+                    {
+                      "message": "vcpus is immutable; replace the machine instead",
+                      "rule": "self == oldSelf"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "diskSize",
+                "memory",
+                "vcpus"
+              ],
+              "type": "object",
+              "x-kubernetes-validations": [
+                {
+                  "message": "providerID must not be set on a template; it identifies a single machine",
+                  "rule": "!has(self.providerID)"
+                },
+                {
+                  "message": "providerID is immutable once set",
+                  "rule": "!has(oldSelf.providerID) || (has(self.providerID) && self.providerID == oldSelf.providerID)"
+                },
+                {
+                  "message": "image is fixed when the machine is created; replace the machine instead",
+                  "rule": "has(self.image) == has(oldSelf.image) && (!has(self.image) || self.image == oldSelf.image)"
+                },
+                {
+                  "message": "networks are fixed when the machine is created; replace the machine instead",
+                  "rule": "has(self.networks) == has(oldSelf.networks) && (!has(self.networks) || self.networks == oldSelf.networks)"
+                }
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "spec"
+          ],
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "template"
+      ],
+      "type": "object",
+      "x-kubernetes-validations": [
+        {
+          "message": "HydraMachineTemplate spec is immutable; create a new template and roll the MachineDeployment onto it",
+          "rule": "self == oldSelf"
+        }
+      ],
+      "additionalProperties": false
+    },
+    "status": {
+      "description": "status defines the observed state of HydraMachineTemplate",
+      "properties": {
+        "capacity": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "pattern": "^(\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\\+|-)?(([0-9]+(\\.[0-9]*)?)|(\\.[0-9]+))))?$",
+            "x-kubernetes-int-or-string": true
+          },
+          "description": "capacity is the resource capacity of a node created from this template.\n\nThis is how Cluster Autoscaler sizes a node pool that has zero replicas:\nwith no Node to inspect, the capacity has to come from the template. cpu\nand memory are both required for scale-from-zero to work at all -- the\nautoscaler skips a node group that cannot report both.\n\nThe values are raw machine sizing, and are an UPPER BOUND on what the node\noffers rather than a prediction of it. The autoscaler simulates a node whose\nallocatable equals capacity; a real node is lower both because the guest\nsees less RAM and disk than the machine was given and because the kubelet\nholds back its eviction thresholds. Measured against a live 2 vCPU / 4Gi /\n40Gi Ubuntu 24.04 node at 6.8% over allocatable memory and 15.2% over\nallocatable ephemeral storage -- docs/scale-from-zero.md carries the full\nfigures and the annotations that override this per pool.\n\nEvery value must be a JSON string. The autoscaler reads this map with\nunstructured.NestedStringMap, which fails whole rather than per-key: a\nsingle integer value -- which the quantity schema would otherwise admit --\ndrops the entire capacity map and disables scale-from-zero with no error\nreported anywhere. The validation rule below refuses that write instead.\n\nNOTE: this field is part of the Cluster API InfraMachineTemplate contract.",
+          "maxProperties": 32,
+          "type": "object",
+          "x-kubernetes-validations": [
+            {
+              "message": "capacity values must be strings; Cluster Autoscaler reads this map as strings and silently discards all of it otherwise",
+              "rule": "self.all(k, type(self[k]) == string)"
+            }
+          ]
+        },
+        "conditions": {
+          "description": "conditions represent the current state of the HydraMachineTemplate\nresource.",
+          "items": {
+            "description": "Condition contains details for one aspect of the current state of this API Resource.",
+            "properties": {
+              "lastTransitionTime": {
+                "description": "lastTransitionTime is the last time the condition transitioned from one status to another.\nThis should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.",
+                "format": "date-time",
+                "type": "string"
+              },
+              "message": {
+                "description": "message is a human readable message indicating details about the transition.\nThis may be an empty string.",
+                "maxLength": 32768,
+                "type": "string"
+              },
+              "observedGeneration": {
+                "description": "observedGeneration represents the .metadata.generation that the condition was set based upon.\nFor instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date\nwith respect to the current state of the instance.",
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "reason": {
+                "description": "reason contains a programmatic identifier indicating the reason for the condition's last transition.\nProducers of specific condition types may define expected values and meanings for this field,\nand whether the values are considered a guaranteed API.\nThe value should be a CamelCase string.\nThis field may not be empty.",
+                "maxLength": 1024,
+                "minLength": 1,
+                "pattern": "^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$",
+                "type": "string"
+              },
+              "status": {
+                "description": "status of the condition, one of True, False, Unknown.",
+                "enum": [
+                  "True",
+                  "False",
+                  "Unknown"
+                ],
+                "type": "string"
+              },
+              "type": {
+                "description": "type of condition in CamelCase or in foo.example.com/CamelCase.",
+                "maxLength": 316,
+                "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "lastTransitionTime",
+              "message",
+              "reason",
+              "status",
+              "type"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          "type": "array",
+          "x-kubernetes-list-map-keys": [
+            "type"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "nodeInfo": {
+          "description": "nodeInfo describes the platform of a node created from this template.\n\nNOTE: this field is part of the Cluster API InfraMachineTemplate contract.",
+          "minProperties": 1,
+          "properties": {
+            "architecture": {
+              "description": "architecture is the CPU architecture of the node.",
+              "enum": [
+                "amd64",
+                "arm64",
+                "s390x",
+                "ppc64le"
+              ],
+              "type": "string"
+            },
+            "operatingSystem": {
+              "description": "operatingSystem is the operating system the node runs, for example \"linux\".",
+              "maxLength": 63,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "spec"
+  ],
+  "type": "object"
+}
