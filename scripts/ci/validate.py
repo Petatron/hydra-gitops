@@ -15,6 +15,10 @@ KUBERNETES_VERSION = "1.35.3"
 K8S_SCHEMAS = "07b64c5376535fbbd6fb9910621e1a41f7613c14"
 CRD_SCHEMAS = "866b2653a5334db9aed20ad74701e20fd464471b"
 KUSTOMIZATIONS = {"kustomization.yaml", "kustomization.yml", "Kustomization"}
+# Argo CD's two spellings for "the cluster this Argo CD runs in".
+IN_CLUSTER_SERVER = "https://kubernetes.default.svc"
+IN_CLUSTER_NAME = "in-cluster"
+TOOL_TIMEOUT = 300
 SHARED_PATHS = (Path("infrastructure/storage"),)
 SELF_REPOSITORY = re.compile(
     r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)"
@@ -119,17 +123,47 @@ def image_fields(value, label, helm_values=False):
             raise Invalid(f"{label}: image repository override requires a tag or sha256 digest")
 
 
+def application_destination(spec, label):
+    """Every Application must target the cluster its own Argo CD runs in.
+
+    The path checks below constrain what an Application *reads*; without this
+    they say nothing about where it *writes*. An Application in either managed
+    tree could otherwise name another registered cluster -- including the
+    management cluster, whose resources are deliberately applied by hand -- and
+    reconcile into it while passing every source-path rule.
+    """
+    destination = spec.get("destination")
+    if not isinstance(destination, dict):
+        raise Invalid(f"{label}: Application destination must be a mapping")
+    server, name = destination.get("server"), destination.get("name")
+    if server is not None and name is not None:
+        raise Invalid(f"{label}: Application destination must set only one of server or name")
+    if server is None and name is None:
+        raise Invalid(f"{label}: Application destination must set server or name")
+    if server is not None and (not isinstance(server, str) or server.rstrip("/") != IN_CLUSTER_SERVER):
+        raise Invalid(f"{label}: Application destination.server must be {IN_CLUSTER_SERVER}")
+    if name is not None and name != IN_CLUSTER_NAME:
+        raise Invalid(f"{label}: Application destination.name must be {IN_CLUSTER_NAME}")
+
+
 def application_paths(resource, root, label, origin):
     workload = len(origin.parts) >= 2 and origin.parts[0] == "clusters" and (
         len(origin.parts) >= 3 or (root / origin).is_dir())
     home = bool(origin.parts) and origin.parts[0] in {"apps", "bootstrap"}
     if not (workload or home) or "management-cluster" in origin.parts:
         raise Invalid(f"{label}: Application is not allowed outside home/cluster Application trees")
-    spec = resource.get("spec", {})
+    spec = resource.get("spec")
+    if not isinstance(spec, dict):
+        raise Invalid(f"{label}: Application spec must be a mapping")
+    application_destination(spec, label)
     sources = list(spec.get("sources") or [])
     if spec.get("source"):
         sources.append(spec["source"])
     for source in sources:
+        # Guard before every .get(): a scalar here used to surface as an
+        # AttributeError traceback rather than a validation failure.
+        if not isinstance(source, dict):
+            raise Invalid(f"{label}: Application source must be a mapping")
         helm = source.get("helm") or {}
         if isinstance(helm.get("values"), str):
             for values in parse(helm["values"], f"{label}:helm.values"):
@@ -199,7 +233,10 @@ def inspect(value, root, label, resources, origin, ancestors=None, helm_values=F
     if kind == "Application" and value.get("apiVersion", "").startswith("argoproj.io/"):
         application_paths(value, root, label, origin)
         spec = value.get("spec", {})
-        sources = [spec.get("source") or {}, *(spec.get("sources") or [])]
+        # application_paths has already rejected non-mapping spec/sources; the
+        # isinstance filter keeps this independently safe if that order changes.
+        sources = [source for source in (spec.get("source") or {}, *(spec.get("sources") or []))
+                   if isinstance(source, dict)]
         # Carry the exact Application values roots through recursive traversal;
         # unrelated repository/tag/digest keys are not Helm image overrides.
         helm_roots = helm_roots | {
@@ -217,19 +254,41 @@ def inspect(value, root, label, resources, origin, ancestors=None, helm_values=F
             inspect(child, root, label, resources, origin, ancestors, helm_values, helm_roots)
     if kind == "ConfigMap":
         for name, content in (value.get("data") or {}).items():
-            if isinstance(content, str) and name.endswith((".yaml", ".yml", ".json")):
+            # Lowercased like the on-disk suffix check: a key spelled
+            # helperPod.YAML holds a manifest just as much as helper-pod.yaml.
+            if isinstance(content, str) and name.lower().endswith((".yaml", ".yml", ".json")):
                 for embedded in parse(content, f"{label}:{name}"):
                     inspect_document(embedded, root, f"{label}:{name}", resources, origin)
 
 
-def schema_validate(resources, label):
+def run(command, label):
+    """Run an external validator, turning a hang into a named failure.
+
+    Without a timeout a stalled schema fetch or a wedged kustomize consumes the
+    whole CI job budget and reports nothing about which file was being checked.
+    """
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=False, timeout=TOOL_TIMEOUT)
+    except subprocess.TimeoutExpired as error:
+        raise Invalid(f"{label}: {command[0]} timed out after {TOOL_TIMEOUT}s") from error
+
+
+def schema_validate(resources, label, cache):
     if not resources:
         return
     with tempfile.TemporaryDirectory(prefix="gitops-schema-") as tmp:
         manifest = Path(tmp) / "resources.json"
-        manifest.write_text("\n---\n".join(json.dumps(r) for r in resources))
+        try:
+            manifest.write_text("\n---\n".join(json.dumps(r) for r in resources))
+        except TypeError as error:
+            # PyYAML builds bytes/date/set for !!binary, an explicit !!timestamp
+            # and !!set. Stripping the implicit timestamp resolver above keeps
+            # bare dates as strings; an explicit tag walks straight past it.
+            raise Invalid(f"{label}: resource contains a value Kubernetes YAML cannot carry "
+                          f"({error}); avoid !!binary, !!timestamp and !!set") from error
         command = [
-            "kubeconform", "-strict", "-summary", "-kubernetes-version", KUBERNETES_VERSION,
+            "kubeconform", "-strict", "-summary", "-cache", cache,
+            "-kubernetes-version", KUBERNETES_VERSION,
             "-schema-location", str(REPO / "schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"),
             "-schema-location", f"https://raw.githubusercontent.com/yannh/kubernetes-json-schema/{K8S_SCHEMAS}/"
             "{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json",
@@ -237,13 +296,18 @@ def schema_validate(resources, label):
             "{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json",
             str(manifest),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = run(command, label)
         if result.returncode:
             raise Invalid(f"{label}: Kubernetes schema validation failed\n{result.stdout}{result.stderr}")
         print(f"{label}: {result.stdout.strip()}")
 
 
 def validate(root):
+    with tempfile.TemporaryDirectory(prefix="gitops-schema-cache-") as cache:
+        _validate(root, cache)
+
+
+def _validate(root, cache):
     root = root.resolve()
     # Include new files locally, and committed files even when .gitignore matches.
     result = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -253,30 +317,31 @@ def validate(root):
     for path in paths:
         # Check before exists(): dangling links otherwise look like deleted files.
         # Directory/extensionless links can also be consumed by Argo or Kustomize.
+        # Rejecting every listed symlink is the whole guard: git records a
+        # symlinked directory as a link blob and never lists paths through it,
+        # so a surviving path cannot resolve outside the repository.
         if path.is_symlink():
             raise Invalid(f"{path.relative_to(root)}: repository symlinks are not allowed")
         if not path.exists():  # locally deleted, not staged yet
             continue
         if path.name not in KUSTOMIZATIONS and path.suffix.lower() not in {".yaml", ".yml", ".json"}:
             continue
-        if not path.resolve().is_relative_to(root):
-            raise Invalid(f"{path.relative_to(root)}: file symlink escapes repository")
         label = str(path.relative_to(root))
         resources = []
         for document in parse(path.read_text(), label):
             inspect_document(document, root, label, resources, path.relative_to(root))
-        schema_validate(resources, label)
+        schema_validate(resources, label, cache)
         if path.name in KUSTOMIZATIONS:
             builds.add(path.parent)
     for directory in sorted(builds):
         label = f"kustomize build {directory.relative_to(root)}"
-        result = subprocess.run(["kustomize", "build", str(directory)], capture_output=True, text=True)
+        result = run(["kustomize", "build", str(directory)], label)
         if result.returncode:
             raise Invalid(f"{label}: failed\n{result.stderr}")
         resources = []
         for document in parse(result.stdout, label):
             inspect_document(document, root, label, resources, directory.relative_to(root))
-        schema_validate(resources, label)
+        schema_validate(resources, label, cache)
     print(f"GitOps validation passed; built {len(builds)} Kustomize directories.")
 
 

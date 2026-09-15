@@ -142,6 +142,12 @@ Applications are forbidden in `infrastructure/` (including shared storage),
 `management-cluster/`, and other unclassified paths. These trees contain leaf
 resources, not additional reconciliation roots; the rule also covers Helm-only
 and generated Applications.
+Every Application must also target the cluster its own Argo CD runs in:
+`destination.server: https://kubernetes.default.svc` or
+`destination.name: in-cluster`, never both. The path rules above constrain what
+an Application *reads*; without this they say nothing about where it *writes*,
+so an Application could name another registered cluster — the management cluster
+included — and reconcile into it while passing every source-path check.
 Use explicit
 image tags (never `latest`) or SHA-256 digests, including embedded helper Pods.
 
@@ -155,20 +161,26 @@ revert PR, and handle any manual prerequisites in the named cluster separately.
 
 [Validate GitOps](.github/workflows/validate.yaml) runs on **every PR**, pushes to
 `main`, merge queues, and manual dispatches. The stable required check name is
-**GitOps validation**. No path filter can leave a documentation PR waiting for a
+**GitOps validation**. Only pull-request runs are superseded by a newer commit;
+runs for `main` and the merge queue are never cancelled, because Argo CD
+reconciles `main` whether or not its validation finished. No path filter can leave a documentation PR waiting for a
 check that never starts. The workflow has read-only repository permissions and
 needs no cluster credentials.
 
 It parses repository YAML/JSON with duplicate-key rejection (YAML merge keys and
 explicit inherited-key overrides are supported; date-like scalars stay strings); validates Kubernetes
 resources against **1.35.3** schemas and pinned CRD schemas; verifies Application
-paths, repository identity, branch, and cluster boundaries (including multi-source
-Applications); rejects management-cluster paths,
+paths, repository identity, branch, in-cluster destinations, and cluster boundaries
+(including multi-source Applications); rejects management-cluster paths,
 Secret payloads, and tagless/`latest` images; and runs `kustomize build` for every
 `kustomization.yaml`, `kustomization.yml`, or `Kustomization`. Rendered output and
 YAML/JSON embedded in ConfigMaps receive the same policy and schema checks.
 Schema validation collects document roots and `List.items`, not nested object
 references such as an HPA `scaleTargetRef`; the parent schema validates those fields.
+Embedded-manifest keys are matched case-insensitively, so `helperPod.YAML` is
+inspected like `helper-pod.yaml`. Values YAML cannot represent in JSON —
+`!!binary`, an explicit `!!timestamp`, `!!set` — are rejected with a named error
+rather than crashing the validator.
 Unknown resource schemas fail validation. Empty ServiceAccount token Secret
 manifests are allowed because the API server fills their data outside Git.
 Here, "empty" means both `data` and `stringData` are omitted; even empty maps

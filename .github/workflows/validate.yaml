@@ -12,7 +12,10 @@ permissions:
 
 concurrency:
   group: validate-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseding a pull request's run is wanted; superseding main's is not.
+  # Argo CD reconciles main with automated sync regardless of CI, so cancelling
+  # a merged commit's validation lets an unchecked commit reach both clusters.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validate:
@@ -28,7 +31,7 @@ jobs:
           python-version: '3.12'
       - name: Install pinned validators
         run: |
-          python -m pip install -r scripts/ci/requirements.txt
+          python -m pip install --require-hashes -r scripts/ci/requirements.txt
           bash scripts/ci/install-tools.sh "$RUNNER_TEMP/bin"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Validate GitHub Actions workflow

@@ -168,10 +168,89 @@ data:
         self.run_validation("resource must have both apiVersion and kind")
 
     def test_invalid_application_schema(self):
+        # A schema violation the policy checks do not intercept, so this still
+        # exercises kubeconform rather than an earlier guard.
+        resource = app()
+        resource["spec"]["project"] = 42
+        self.write("apps/broken.yaml", resource)
+        self.run_validation("Kubernetes schema validation failed")
+
+    def test_application_spec_must_be_a_mapping(self):
+        resource = app()
+        resource["spec"] = "oops"
+        self.write("apps/broken.yaml", resource)
+        self.run_validation("Application spec must be a mapping")
+
+    def test_application_source_must_be_a_mapping(self):
+        resource = app()
+        resource["spec"]["source"] = "oops"
+        self.write("apps/broken.yaml", resource)
+        self.run_validation("Application source must be a mapping")
+
+    def test_multisource_entry_must_be_a_mapping(self):
+        resource = app()
+        del resource["spec"]["source"]
+        resource["spec"]["sources"] = ["oops"]
+        self.write("apps/broken.yaml", resource)
+        self.run_validation("Application source must be a mapping")
+
+    def test_destination_must_be_a_mapping(self):
         resource = app()
         resource["spec"]["destination"] = 42
         self.write("apps/broken.yaml", resource)
-        self.run_validation("Kubernetes schema validation failed")
+        self.run_validation("Application destination must be a mapping")
+
+    def test_destination_cannot_target_another_cluster(self):
+        resource = app()
+        resource["spec"]["destination"] = {"server": "https://192.168.16.10:6443", "namespace": "default"}
+        self.write("apps/broken.yaml", resource)
+        self.run_validation("destination.server must be")
+
+    def test_destination_cannot_name_a_registered_cluster(self):
+        resource = app()
+        resource["spec"]["destination"] = {"name": "management", "namespace": "default"}
+        self.write("apps/broken.yaml", resource)
+        self.run_validation("destination.name must be")
+
+    def test_destination_cannot_set_both_server_and_name(self):
+        resource = app()
+        resource["spec"]["destination"] = {"server": "https://kubernetes.default.svc",
+                                           "name": "in-cluster", "namespace": "default"}
+        self.write("apps/broken.yaml", resource)
+        self.run_validation("only one of server or name")
+
+    def test_destination_is_required(self):
+        resource = app()
+        del resource["spec"]["destination"]
+        self.write("apps/broken.yaml", resource)
+        self.run_validation("Application destination must be a mapping")
+
+    def test_in_cluster_destinations_are_accepted(self):
+        by_server = app()
+        self.write("apps/by-server.yaml", by_server)
+        by_name = app()
+        by_name["metadata"]["name"] = "by-name"
+        by_name["spec"]["destination"] = {"name": "in-cluster", "namespace": "default"}
+        self.write("apps/by-name.yaml", by_name)
+        self.run_validation()
+
+    def test_binary_tagged_scalar_is_rejected_cleanly(self):
+        self.write("cm.yaml", "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+                              "binaryData:\n  blob: !!binary |\n    aGVsbG8=\n")
+        self.run_validation("Kubernetes YAML cannot carry")
+
+    def test_explicit_timestamp_tag_is_rejected_cleanly(self):
+        # The implicit timestamp resolver is stripped so bare dates stay strings;
+        # an explicit tag bypasses that and must still fail as a validation error.
+        self.write("cm.yaml", "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+                              "data:\n  when: !!timestamp 2026-01-01\n")
+        self.run_validation("Kubernetes YAML cannot carry")
+
+    def test_embedded_manifest_key_suffix_is_case_insensitive(self):
+        self.write("cm.yaml", {"apiVersion": "v1", "kind": "ConfigMap",
+                               "metadata": {"name": "x"},
+                               "data": {"helperPod.YAML": yaml.safe_dump(pod(image="busybox"))}})
+        self.run_validation("image must have an explicit non-latest tag")
 
     def test_unknown_schema_fails_closed(self):
         self.write("unknown.yaml", {"apiVersion": "unknown.example/v1", "kind": "Unknown",
