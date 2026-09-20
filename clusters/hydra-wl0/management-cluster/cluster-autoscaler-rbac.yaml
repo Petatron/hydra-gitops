@@ -93,6 +93,21 @@ rules:
 #
 # Adding a second pool means adding its name below. That is the intended cost:
 # the alternative is a token that can scale pools nobody has thought about.
+#
+# PET-12 paid that cost and it is worth recording what it looks like, because
+# the pool is otherwise entirely healthy. `pool-compute` was discovered as a node
+# group with the right bounds, its capacity resolved, and CA picked it as the
+# expansion option for a pending pod -- then the scale-up itself was refused:
+#
+#   Node group MachineDeployment/default/pool-compute is not ready for scaleup -
+#   backoff with status: failed to increase node group size:
+#   machinedeployments.cluster.x-k8s.io "pool-compute" is forbidden: User
+#   "system:serviceaccount:cluster-autoscaler-hydra-wl0:cluster-autoscaler-hydra-wl0"
+#   cannot patch resource "machinedeployments/scale"
+#
+# The pod also gets a NotTriggerScaleUp event, but nothing about the pool's own
+# status says anything is wrong. A new pool is not scalable until its name is
+# here.
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
@@ -104,6 +119,7 @@ rules:
       - machinedeployments/scale
     resourceNames:
       - hydra-wl0-md-0
+      - pool-compute
     verbs:
       - get
       - patch
