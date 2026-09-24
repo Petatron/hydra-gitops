@@ -132,19 +132,81 @@ the **management** cluster:
 ```sh
 kubectl --context <management> -n default annotate machinedeployment hydra-wl0-md-0 \
   cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size=1 \
-  cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size=3
+  cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size=3 \
+  cluster.x-k8s.io/autoscaling-options-scaledownutilizationthreshold=0
 ```
 
-Without both annotations CA discovers nothing, and says so only at `-v=4`. The
-bounds above are PET-10's minimum to demonstrate discovery; the actual policy —
-and whether `min` should be `0` — is PET-11.
+**The third annotation exempts this pool from scale-down (PET-13).** One of its
+two workers runs all of Argo CD and nothing in this cluster has a
+PodDisruptionBudget, so it must not be drained just because it looks idle. A node
+counts as underutilised only when utilisation is **at or below** the threshold,
+so `"0"` protects every node that requests anything — and each md-0 node's
+DaemonSets alone request 20m CPU. It would *not* protect a node with literally
+nothing requested. The key is lowercase and the prefix match is case-sensitive,
+and **an unparseable value is skipped silently**, reverting to the 0.5 default
+with no error. Check it after any edit — see [Verifying](#verifying).
+
+The two bounds do not gate discovery symmetrically, which is easy to get wrong.
+A missing annotation reads as `0`; then `max < min` is a hard error — one that
+aborts discovery for **every** pool, not just this one — and `max == 0` is a
+silent skip. So a missing `min-size` gives a discovered pool with a floor of
+zero, not an ignored one. The full rule, and how to choose the bounds, is
+`cluster-api-provider-hydra/docs/autoscaling-policy.md` (PET-11).
+
+**A pool CA should scale also has to be named in the RBAC.** The write role in
+`../management-cluster/cluster-autoscaler-rbac.yaml` pins
+`machinedeployments/scale` to a `resourceNames` list, so a new pool is discovered,
+bounded and even chosen for scale-up — and then refused with `forbidden ... cannot
+patch resource "machinedeployments/scale"`. Nothing in the pool's own status says
+so. PET-12 hit exactly this for `pool-compute`.
 
 ## Verifying
 
 ```sh
 kubectl --context hydra-wl0 -n cluster-autoscaler logs deploy/cluster-autoscaler \
-  | grep -iE "node group|clusterapi|permission|forbidden"
+  | grep -iE "node ?group|clusterapi|permission|forbidden|infrastructure reference"
 ```
+
+The optional space in `node ?group` is deliberate: CA logs `discovered node group:
+%s` but `nodegroup %s has no scaling capacity, skipping` — and the second is the
+one that explains a missing pool.
+
+**The md-0 exemption is working** when every md-0 node reports, at `-v=4`:
+
+```
+Node hydra-wl0-md-0-... unremovable: cpu requested (6.02% of allocatable) is above the scale-down utilization threshold
+```
+
+With the default threshold those same nodes would be *candidates* instead. If
+you see an md-0 node listed as unneeded, the annotation did not parse — fix it
+before `--scale-down-unneeded-time` (10 minutes by default) elapses.
+
+### Exercising the scale-down admission policy
+
+Scale-down's `update` on Machines cannot be pinned by name, so it is fenced by a
+ValidatingAdmissionPolicy (see the RBAC file). Run this after every apply of that
+file. It makes no changes — every update is `--dry-run=server`, which still goes
+through admission. One must be admitted and four refused:
+
+```sh
+SA=system:serviceaccount:cluster-autoscaler-hydra-wl0:cluster-autoscaler-hydra-wl0
+M="kubectl --context <management> -n default"
+try() { $M get machine "$1" -o json | jq "$2" | $M replace --dry-run=server --as="$SA" -f - 2>&1 | tail -1; }
+
+WORKER=$($M get machines -l 'cluster.x-k8s.io/cluster-name=hydra-wl0,!cluster.x-k8s.io/control-plane' -o name | head -1 | cut -d/ -f2)
+CP=$($M get machines -l 'cluster.x-k8s.io/cluster-name=hydra-wl0,cluster.x-k8s.io/control-plane' -o name | head -1 | cut -d/ -f2)
+OTHER=$($M get machines -l 'cluster.x-k8s.io/cluster-name!=hydra-wl0' -o name | head -1 | cut -d/ -f2)
+
+try "$WORKER" '.metadata.annotations["cluster.x-k8s.io/delete-machine"]="dry-run"'  # ADMITTED
+try "$OTHER"  '.metadata.annotations["cluster.x-k8s.io/delete-machine"]="dry-run"'  # refused: another cluster
+try "$CP"     '.metadata.annotations["cluster.x-k8s.io/delete-machine"]="dry-run"'  # refused: control plane
+try "$WORKER" '.metadata.annotations["example.com/probe"]="1"'                      # refused: other annotation
+try "$WORKER" '.metadata.labels["example.com/probe"]="1"'                           # refused: label
+```
+
+Use `replace`, not `annotate`: `kubectl annotate` sends a PATCH, which RBAC
+checks as the `patch` verb — not granted — so it would be refused before the
+policy is ever consulted, and prove nothing about the policy.
 
 A healthy start names the discovered group and its bounds. Things to know before
 reading the output:
