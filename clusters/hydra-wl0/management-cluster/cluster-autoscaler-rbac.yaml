@@ -84,12 +84,10 @@ rules:
 #     surface during PET-12 as a permissions error at the worst possible time,
 #     so both verbs are granted here.
 #
-#  3. No `update` on machines, machinesets or machinepools. CA scales a pool
-#     down by Update-ing the chosen Machine with a delete annotation
-#     (MarkMachineForDeletion) and lowering the replica count -- Cluster API
-#     does the deleting. This Deployment runs with --scale-down-enabled=false,
-#     so it never takes that path, and the permission arrives with PET-13
-#     alongside the behaviour that needs it.
+#  3. No `update` on machines, machinesets or machinepools in THIS role.
+#     Scale-down needs update on machines, and that grant arrived with PET-13
+#     -- but it cannot be pinned by resourceNames, so it lives in its own
+#     namespaced Role further down, fenced by an admission policy.
 #
 # Adding a second pool means adding its name below. That is the intended cost:
 # the alternative is a token that can scale pools nobody has thought about.
@@ -146,6 +144,137 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: cluster-autoscaler-management-scale-hydra-wl0
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler-hydra-wl0
+    namespace: cluster-autoscaler-hydra-wl0
+---
+# The fence for the scale-down grant below. It is applied BEFORE the grant --
+# kubectl applies in file order -- so the Role never exists unfenced, not even
+# for the moment between the two.
+#
+# Scoped to one ServiceAccount by matchConditions, so Cluster API's
+# own controllers and human operators -- which update Machines constantly -- are
+# never evaluated by it.
+#
+# failurePolicy: Fail means an expression that cannot be evaluated refuses the
+# update rather than waving it through. For this ServiceAccount that is the
+# safe direction: a refused mark leaves the node in place.
+#
+# `object` here is the post-mutation object, so if a Cluster API defaulting
+# webhook ever starts rewriting spec on update, the spec check will refuse CA's
+# marks. That would surface as scale-down failing, not as anything unsafe --
+# and it is why the policy must be exercised with dry-run updates after every
+# apply, before scale-down depends on it. ../cluster-autoscaler/README.md has
+# the procedure: one update it must admit, and four it must refuse.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: cluster-autoscaler-hydra-wl0-machine-updates
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["cluster.x-k8s.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["machines"]
+  matchConditions:
+    - name: hydra-wl0-autoscaler-only
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:cluster-autoscaler-hydra-wl0:cluster-autoscaler-hydra-wl0'
+  variables:
+    - name: deleteKey
+      expression: "'cluster.x-k8s.io/delete-machine'"
+    - name: oldAnn
+      expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: newAnn
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+    - name: oldLabels
+      expression: "has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
+    - name: newLabels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+  validations:
+    - expression: "oldObject.spec.clusterName == 'hydra-wl0'"
+      message: "The hydra-wl0 autoscaler may only update Machines that belong to cluster hydra-wl0."
+    - expression: "!('cluster.x-k8s.io/control-plane' in variables.oldLabels)"
+      message: "The hydra-wl0 autoscaler may not update control-plane Machines."
+    - expression: "object.spec == oldObject.spec"
+      message: "The hydra-wl0 autoscaler may not change a Machine's spec."
+    - expression: "variables.newLabels == variables.oldLabels"
+      message: "The hydra-wl0 autoscaler may not change a Machine's labels."
+    - expression: >-
+        (has(object.metadata.finalizers) ? object.metadata.finalizers : []) ==
+        (has(oldObject.metadata.finalizers) ? oldObject.metadata.finalizers : [])
+      message: "The hydra-wl0 autoscaler may not change a Machine's finalizers."
+    - expression: >-
+        (has(object.metadata.ownerReferences) ? object.metadata.ownerReferences : []) ==
+        (has(oldObject.metadata.ownerReferences) ? oldObject.metadata.ownerReferences : [])
+      message: "The hydra-wl0 autoscaler may not change a Machine's ownerReferences."
+    - expression: >-
+        variables.newAnn.all(k, k == variables.deleteKey ||
+          (k in variables.oldAnn && variables.oldAnn[k] == variables.newAnn[k])) &&
+        variables.oldAnn.all(k, k == variables.deleteKey || k in variables.newAnn)
+      message: "The hydra-wl0 autoscaler may only add or remove the cluster.x-k8s.io/delete-machine annotation."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: cluster-autoscaler-hydra-wl0-machine-updates
+spec:
+  policyName: cluster-autoscaler-hydra-wl0-machine-updates
+  validationActions:
+    - Deny
+---
+# Scale-down (PET-13): update on Machines, fenced by the admission policy above.
+#
+# CA removes a node by marking its Machine and then lowering the pool's replica
+# count; Cluster API does the draining and the deleting. Verified against the
+# 1.35.2 source: MarkMachineForDeletion does a direct Get -- already granted by
+# the read role -- then an Update that sets exactly one annotation,
+# cluster.x-k8s.io/delete-machine, to time.Now().String(). Unmarking removes it
+# the same way. Lowering replicas is the scale patch already pinned above.
+#
+# This grant CANNOT be pinned by resourceNames the way the scale patch is.
+# Machine names are generated (pool-compute-7swj7-h4qzg), so there is no list
+# to write down. Unfenced, update on machines in `default` would cover every
+# Machine there -- including the management cluster's own (cluster `hydra`) and
+# hydra-wl0's three control-plane Machines -- and `update` can rewrite any
+# mutable field, not just an annotation.
+#
+# So two fences, and both are needed:
+#
+#   1. A namespaced Role, not a ClusterRole. Discovery is namespace=default, so
+#      the grant stops at that namespace.
+#   2. The ValidatingAdmissionPolicy above. It admits this ServiceAccount's
+#      Machine updates only when the Machine belongs to hydra-wl0, is not a
+#      control-plane Machine, and nothing changes except the delete-machine
+#      annotation. RBAC answers "may this verb touch this kind at all"; the
+#      policy answers "is this the one change CA actually makes". For the scale
+#      subresource resourceNames did both jobs; for Machines it takes two.
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-scaledown-hydra-wl0
+  namespace: default
+rules:
+  - apiGroups:
+      - cluster.x-k8s.io
+    resources:
+      - machines
+    verbs:
+      - update
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-management-scaledown-hydra-wl0
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cluster-autoscaler-management-scaledown-hydra-wl0
 subjects:
   - kind: ServiceAccount
     name: cluster-autoscaler-hydra-wl0

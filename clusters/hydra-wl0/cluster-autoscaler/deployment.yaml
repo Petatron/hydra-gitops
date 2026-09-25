@@ -79,17 +79,31 @@ spec:
             # ../management-cluster/cluster-autoscaler-rbac.yaml is what
             # actually stops that token scaling another cluster's pool.
             - --node-group-auto-discovery=clusterapi:namespace=default,clusterName=hydra-wl0
-            # PET-10 proves discovery, nothing more. Scale-down is PET-13's, and
-            # leaving it on here would let CA drain this cluster's workers as
-            # soon as it decided they were underutilised -- on the only cluster
-            # Hydra has ever been proven to build.
+            # Scale-down is ON (PET-13). There is no flag for it: the default is
+            # on, and --scale-down-enabled is deprecated in 1.35 with no
+            # replacement, so the flag is simply absent rather than set to true.
             #
-            # 1.35 logs this flag as deprecated when set to false, and offers no
-            # replacement -- the warning says only "will be removed in a future
-            # release". It still works. Recorded here so the intent is known
-            # when it does go: what is wanted is scale-down off entirely, not a
-            # particular flag.
-            - --scale-down-enabled=false
+            # Which pools it can act on is decided per pool, on the management
+            # cluster, not here:
+            #
+            #   hydra-wl0-md-0  EXEMPT. Carries
+            #                   cluster.x-k8s.io/autoscaling-options-scaledownutilizationthreshold: "0"
+            #                   so none of its nodes ever counts as underutilised.
+            #                   One of its two workers runs all of Argo CD, and
+            #                   nothing in this cluster has a PodDisruptionBudget.
+            #   pool-compute    Scaled up and down by CA as demand changes.
+            #
+            # The exemption holds because a node counts as underutilised only
+            # when utilisation <= threshold, and every md-0 node's DaemonSets
+            # alone request 20m CPU -- so no node there can reach zero. A
+            # threshold of "0" would NOT protect a node with literally nothing
+            # requested. A value that does not parse logs a `failed to convert
+            # autoscaling_options` warning and reverts to the 0.5 default; an
+            # empty value is skipped with no log at all. Check it after any edit:
+            # the README's verification section shows the line to expect.
+            #
+            # hycluster-worker-0 belongs to no node group, so CA can never
+            # remove it -- see PET-52.
             # Node-group discovery and capacity resolution are logged at V(4),
             # and PET-10's acceptance criteria are about exactly those lines.
             - --v=4
