@@ -97,9 +97,10 @@ spec:
             # when utilisation <= threshold, and every md-0 node's DaemonSets
             # alone request 20m CPU -- so no node there can reach zero. A
             # threshold of "0" would NOT protect a node with literally nothing
-            # requested. And an unparseable value is skipped silently, reverting
-            # to the 0.5 default with no error, so check it after any edit:
-            # the README's verification section shows the log line to expect.
+            # requested. A value that does not parse logs a `failed to convert
+            # autoscaling_options` warning and reverts to the 0.5 default; an
+            # empty value is skipped with no log at all. Check it after any edit:
+            # the README's verification section shows the line to expect.
             #
             # hycluster-worker-0 belongs to no node group, so CA can never
             # remove it -- see PET-52.
