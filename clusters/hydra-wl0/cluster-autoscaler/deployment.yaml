@@ -102,8 +102,31 @@ spec:
             # empty value is skipped with no log at all. Check it after any edit:
             # the README's verification section shows the line to expect.
             #
+            # The annotation is no longer md-0's only guard (PET-54). The
+            # admission policy in ../management-cluster/ refuses CA's delete mark
+            # on any md-0 Machine, so a lost exemption can no longer cost md-0 a
+            # node. It cannot stop a drain, though -- CA evicts before it marks.
+            # The flag below covers that half.
+            #
             # hycluster-worker-0 belongs to no node group, so CA can never
             # remove it -- see PET-52.
+            #
+            # Pinned to its default on purpose (PET-54): this is what stops CA
+            # draining the node that runs Argo CD, wherever that node is. Any pod
+            # with a disk-backed emptyDir or a hostPath makes its node
+            # unremovable, and the 1.35.2 source applies that rule during the
+            # removal simulation -- before anything is cordoned. Five of Argo
+            # CD's seven pods carry one (application-controller,
+            # applicationset-controller, dex, repo-server, server). Redis and
+            # notifications-controller do not, so a node holding only those two
+            # is still drainable.
+            #
+            # `false` is a common setting to let scale-down work around emptyDir
+            # pods. Setting it here would quietly remove Argo CD's protection,
+            # and there is nothing in Git to fall back on: Argo CD on this
+            # cluster is installed by hand from upstream, so a safe-to-evict
+            # annotation on its pods would be hand-applied drift.
+            - --skip-nodes-with-local-storage=true
             # Node-group discovery and capacity resolution are logged at V(4),
             # and PET-10's acceptance criteria are about exactly those lines.
             - --v=4

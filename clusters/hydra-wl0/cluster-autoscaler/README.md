@@ -27,8 +27,8 @@ admin" might suggest:
   Cluster API objects across namespaces, and RBAC's `resourceNames` does not
   apply to `list`/`watch`. This token can read every Cluster API object on the
   management cluster, including other clusters'.
-- **Writes are pinned** to `machinedeployments/scale` on `hydra-wl0-md-0` via
-  `resourceNames`. It cannot scale `hydra-md-0` — which matters, because that
+- **Writes are pinned** to `machinedeployments/scale` on `hydra-wl0-md-0` and
+  `pool-compute` via `resourceNames`. It cannot scale `hydra-md-0` — which matters, because that
   pool is in the same `default` namespace and belongs to the management cluster
   itself.
 - **The discovery flag is not a boundary.**
@@ -42,8 +42,14 @@ and the md-0 scale-down exemption — governs what *CA* chooses to do, not what 
 token holder can request. The credential can also `update` Machines in
 `default` (PET-13 scale-down), but a ValidatingAdmissionPolicy limits that to
 adding or removing the `cluster.x-k8s.io/delete-machine` annotation on
-`hydra-wl0`'s non-control-plane Machines. It cannot scale `hydra-md-0`, and it
+`hydra-wl0`'s non-control-plane Machines — and refuses adding it to a
+`hydra-wl0-md-0` Machine (PET-54). It cannot scale `hydra-md-0`, and it
 cannot touch the management cluster's own Machines.
+
+That md-0 refusal constrains CA's own scale-down path, which marks a Machine
+before it lowers replicas. It does not stop a token holder lowering md-0's
+replica count directly through the scale subresource — CA needs that grant to
+scale md-0 *up* — and Cluster API then picks which md-0 Machine to delete.
 
 ## Setup
 
@@ -194,33 +200,57 @@ autoscaling_options` warning, the exemption is not in force.
 The order is what makes the window after Argo syncs safe: without the Role, CA's
 `MarkMachineForDeletion` is refused with a 403, and `DeleteNodes` returns on a
 failed mark *before* it calls `SetSize` — verified in the 1.35.2 source — so no
-replica count changes. Once the Role exists, the exemption annotation is the only
-thing standing between an idle md-0 node and a drain: the admission policy
-admits marks on md-0 workers, because they are non-control-plane `hydra-wl0`
-Machines.
+replica count changes. Once the Role exists, the same ordering is what the
+admission policy's md-0 rule relies on (PET-54): it refuses the mark on an md-0
+Machine, so a lost exemption can no longer cost md-0 a node.
+
+**That rule does not stop a drain.** CA cordons and evicts *before* it marks, so
+by the time the policy refuses the mark, the node's pods are gone. What stops CA
+draining the node that runs Argo CD is `--skip-nodes-with-local-storage=true`,
+pinned in `deployment.yaml`: five of Argo CD's seven pods have a disk-backed
+`emptyDir`, which makes their node unremovable during the removal simulation,
+before anything is cordoned. Keep the exemption annotation anyway. It is the only
+one of the three that stops the drain on an md-0 node that is *not* running one
+of those pods.
 
 ### Exercising the scale-down admission policy
 
 Scale-down's `update` on Machines cannot be pinned by name, so it is fenced by a
 ValidatingAdmissionPolicy (see the RBAC file). Run this after every apply of that
 file. It makes no changes — every update is `--dry-run=server`, which still goes
-through admission. One must be admitted and four refused:
+through admission. Two must be admitted and five refused.
+
+`WORKER` must come from a pool that is allowed to scale down, not from md-0 —
+an md-0 Machine is now refused the mark, which is the point. If every such pool
+is at zero, scale one to 1 for the test and back to 0 afterwards; the dry runs
+need a real Machine to replace.
 
 ```sh
 SA=system:serviceaccount:cluster-autoscaler-hydra-wl0:cluster-autoscaler-hydra-wl0
 M="kubectl --context <management> -n default"
 try() { $M get machine "$1" -o json | jq "$2" | $M replace --dry-run=server --as="$SA" -f - 2>&1 | tail -1; }
 
-WORKER=$($M get machines -l 'cluster.x-k8s.io/cluster-name=hydra-wl0,!cluster.x-k8s.io/control-plane' -o name | head -1 | cut -d/ -f2)
+WORKER=$($M get machines -l 'cluster.x-k8s.io/cluster-name=hydra-wl0,!cluster.x-k8s.io/control-plane,cluster.x-k8s.io/deployment-name!=hydra-wl0-md-0' -o name | head -1 | cut -d/ -f2)
+MD0=$($M get machines -l 'cluster.x-k8s.io/deployment-name=hydra-wl0-md-0' -o name | head -1 | cut -d/ -f2)
 CP=$($M get machines -l 'cluster.x-k8s.io/cluster-name=hydra-wl0,cluster.x-k8s.io/control-plane' -o name | head -1 | cut -d/ -f2)
 OTHER=$($M get machines -l 'cluster.x-k8s.io/cluster-name!=hydra-wl0' -o name | head -1 | cut -d/ -f2)
 
 try "$WORKER" '.metadata.annotations["cluster.x-k8s.io/delete-machine"]="dry-run"'  # ADMITTED
+try "$MD0"    '.'                                                                    # ADMITTED: md-0 is not blanket-refused
+try "$MD0"    '.metadata.annotations["cluster.x-k8s.io/delete-machine"]="dry-run"'  # refused: md-0 is exempt (PET-54)
 try "$OTHER"  '.metadata.annotations["cluster.x-k8s.io/delete-machine"]="dry-run"'  # refused: another cluster
 try "$CP"     '.metadata.annotations["cluster.x-k8s.io/delete-machine"]="dry-run"'  # refused: control plane
 try "$WORKER" '.metadata.annotations["example.com/probe"]="1"'                      # refused: other annotation
 try "$WORKER" '.metadata.labels["example.com/probe"]="1"'                           # refused: label
 ```
+
+An empty `WORKER` makes the first and last two lines fail with a `get` error
+rather than an admission result — read the output, not just the count.
+
+The md-0 no-op is the closest observable stand-in for "removing the mark is still
+admitted": both leave the annotation absent from the new object, which is the
+branch the md-0 rule allows. Observing a real removal would mean first putting a
+delete mark on a live md-0 Machine, which is not worth the risk.
 
 Use `replace`, not `annotate`: `kubectl annotate` sends a PATCH, which RBAC
 checks as the `patch` verb — not granted — so it would be refused before the
@@ -241,7 +271,10 @@ reading the output:
 - **Scale-down is on (PET-13), and exempt for `hydra-wl0-md-0`.** Only pools
   without the exemption can shrink; today that is `pool-compute`. Removing the
   exemption makes md-0's workers — one of which runs all of Argo CD, with no
-  PodDisruptionBudget — candidates the moment they look idle.
+  PodDisruptionBudget — candidates the moment they look idle. Since PET-54 a
+  candidate md-0 node can be drained but not deleted (the admission policy
+  refuses its mark), and the node running Argo CD cannot be drained by CA at all
+  while `--skip-nodes-with-local-storage` stays `true`.
 - **The management connection crosses sites.** The management control plane is
   at a different site from these VMs — measured 50 ms from a pod here. A
   partition between them stops autoscaling: CA can neither read

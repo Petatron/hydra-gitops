@@ -166,7 +166,7 @@ subjects:
 # marks. That would surface as scale-down failing, not as anything unsafe --
 # and it is why the policy must be exercised with dry-run updates after every
 # apply, before scale-down depends on it. ../cluster-autoscaler/README.md has
-# the procedure: one update it must admit, and four it must refuse.
+# the procedure: two updates it must admit, and five it must refuse.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -217,6 +217,29 @@ spec:
           (k in variables.oldAnn && variables.oldAnn[k] == variables.newAnn[k])) &&
         variables.oldAnn.all(k, k == variables.deleteKey || k in variables.newAnn)
       message: "The hydra-wl0 autoscaler may only add or remove the cluster.x-k8s.io/delete-machine annotation."
+    # PET-54: md-0 is exempt from scale-down by an annotation on its
+    # MachineDeployment, and until this rule that annotation was its only
+    # guard -- a deleted, emptied or mistyped value would have made its workers
+    # ordinary candidates. This refuses the mark itself: adding it to an md-0
+    # Machine, or changing its value, is refused. Removing it stays allowed,
+    # because CA unmarks a Machine when a scale-down fails part-way.
+    #
+    # A denylist of the one protected pool, deliberately not an allowlist of the
+    # scalable ones. An allowlist would be a second per-pool list every new pool
+    # has to join, on top of resourceNames above -- and forgetting it would fail
+    # closed and silently, exactly like forgetting resourceNames does.
+    #
+    # This stops md-0 losing a node. It does not stop a drain: CA cordons and
+    # evicts BEFORE it marks, so a refused mark arrives after the pods have
+    # gone. What keeps CA from draining the node that runs Argo CD is
+    # --skip-nodes-with-local-storage in ../cluster-autoscaler/deployment.yaml.
+    - expression: >-
+        !(('cluster.x-k8s.io/deployment-name' in variables.oldLabels &&
+           variables.oldLabels['cluster.x-k8s.io/deployment-name'] == 'hydra-wl0-md-0') &&
+          variables.deleteKey in variables.newAnn &&
+          (!(variables.deleteKey in variables.oldAnn) ||
+           variables.newAnn[variables.deleteKey] != variables.oldAnn[variables.deleteKey]))
+      message: "The hydra-wl0 autoscaler may not mark hydra-wl0-md-0 Machines for deletion: that pool is exempt from scale-down."
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -250,7 +273,8 @@ spec:
 #   2. The ValidatingAdmissionPolicy above. It admits this ServiceAccount's
 #      Machine updates only when the Machine belongs to hydra-wl0, is not a
 #      control-plane Machine, and nothing changes except the delete-machine
-#      annotation. RBAC answers "may this verb touch this kind at all"; the
+#      annotation -- which it may not add to an md-0 Machine at all (PET-54).
+#      RBAC answers "may this verb touch this kind at all"; the
 #      policy answers "is this the one change CA actually makes". For the scale
 #      subresource resourceNames did both jobs; for Machines it takes two.
 kind: Role
