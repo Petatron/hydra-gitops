@@ -17,8 +17,10 @@
 # Each run (image: cluster-api-provider-hydra's tools/etcd-backup):
 #   - lists hydra-wl0's control-plane Machines for their InternalIPs, so it
 #     follows rollouts and remediation without reconfiguration
-#   - snapshots the first member that passes a linearizable health check --
-#     one cut off from quorum would still hand over stale data -- and verifies it
+#   - snapshots the first member that answers a linearizable read -- one cut
+#     off from quorum would still hand over stale data -- and verifies it. Not
+#     `etcdctl endpoint health`: that fails on any alarm, and would refuse a
+#     backup under NOSPACE, when one is wanted most
 #   - encrypts it to the age recipients below and writes it to the volume
 #   - only then prunes: the 48 newest + the first of each of 14 UTC days are
 #     kept (by count: a retried run adds one), and only after an independent
@@ -36,7 +38,8 @@
 #   3. kubectl -n hydra-backup create job --from=cronjob/etcd-backup-hydra-wl0 first-run
 #      and read its log: one "wrote ..." line, no ERROR.
 #   4. Prove the backup can be restored, not merely that it was written: copy
-#      the .db.age off hlcluster-ctrlr0, `age -d -i <offline key>` it, and run
+#      the .db.age off hlcluster-ctrlr0 (root-owned, mode 0600, so sudo on the
+#      node), `age -d -i <offline key>` it, and run
 #      `etcdutl snapshot status` on the result. A typo in the recipient, or a
 #      key nobody holds, makes backups that pass every check here and restore
 #      nothing. The PET-23 restore runbook has the full drill.
