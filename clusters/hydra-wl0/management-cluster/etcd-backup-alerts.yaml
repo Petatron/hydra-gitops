@@ -1,0 +1,265 @@
+# ############################################################################
+# APPLIED TO THE MANAGEMENT CLUSTER, NOT TO hydra-wl0. Apply by hand, after
+# etcd-backup.yaml (it creates the namespace):
+#
+#   kubectl --context <management> apply -f etcd-backup-alerts.yaml
+# ############################################################################
+#
+# How a missed or failed hydra-wl0 etcd backup gets noticed (PET-23).
+#
+# The management cluster had no kube-state-metrics, so nothing exported a
+# CronJob's last successful run. This is one, deliberately narrow: it watches
+# only CronJobs and Jobs, only in hydra-backup, with a namespaced Role -- not
+# the cluster-wide read a default install takes. Widening it is PET-64's call.
+#
+# The signal that matters is "no successful backup recently". Everything that
+# can go wrong with a run ends there: no healthy etcd member, a bad snapshot, a
+# full volume, an encryption failure, a refused or failed prune, a clock that
+# moved backwards. The job's log says which. The client certificate's expiry is
+# a separate daily job with its own alert, so it can never mask those.
+#
+# Routing to a person is PET-64. Until its receiver exists, these fire into
+# the management cluster's Alertmanager and are visible there and in Grafana.
+#
+# The ServiceMonitor and PrometheusRule carry release: radar-monitoring because
+# that is what the management cluster's Prometheus selects, in any namespace.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: hydra-backup
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-state-metrics
+  namespace: hydra-backup
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-state-metrics
+  namespace: hydra-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kube-state-metrics
+subjects:
+  - kind: ServiceAccount
+    name: kube-state-metrics
+    namespace: hydra-backup
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: hydra-backup
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kube-state-metrics
+    spec:
+      serviceAccountName: kube-state-metrics
+      # Beside the backups on the node at home: on a management worker it would
+      # go down with the hypervisor, and that is exactly when it is needed. This
+      # only helps because what evaluates and routes the alerts is there too:
+      # radar-monitoring's Prometheus and Alertmanager both run on
+      # hlcluster-ctrlr0 (checked 2026-10-17). A dead-man's switch for that node
+      # itself is PET-64's.
+      nodeSelector:
+        kubernetes.io/hostname: hlcluster-ctrlr0
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
+          args:
+            - --resources=cronjobs,jobs
+            - --namespaces=hydra-backup
+            - --port=8080
+            - --telemetry-port=8081
+          ports:
+            - name: http-metrics
+              containerPort: 8080
+            - name: telemetry
+              containerPort: 8081
+          # Upstream serves /livez on the metrics port and /readyz on telemetry.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: hydra-backup
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+spec:
+  selector:
+    app.kubernetes.io/name: kube-state-metrics
+  ports:
+    - name: http-metrics
+      port: 8080
+      targetPort: http-metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-state-metrics-hydra-backup
+  namespace: hydra-backup
+  labels:
+    release: radar-monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  endpoints:
+    - port: http-metrics
+      interval: 60s
+      # Keep the CronJob's own namespace/name labels, not the scrape target's.
+      honorLabels: true
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: etcd-backup
+  namespace: hydra-backup
+  labels:
+    release: radar-monitoring
+spec:
+  groups:
+    - name: etcd-backup
+      rules:
+        - alert: EtcdBackupStale
+          # Hourly schedule: 3h is two missed runs and a slow third.
+          expr: |
+            time() - max by (namespace, cronjob) (
+              kube_cronjob_status_last_successful_time{namespace="hydra-backup", cronjob=~"etcd-backup-.*"}
+            ) > 3 * 3600
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "No successful etcd backup from {{ $labels.cronjob }} in over 3 hours"
+            description: >-
+              The last successful run of {{ $labels.namespace }}/{{ $labels.cronjob }} was
+              {{ $value | humanizeDuration }} ago. Read the latest Job's log: it names the
+              failure (unreachable etcd, a bad snapshot, encryption, pruning, or a client
+              certificate near expiry -- renew with etcd-backup-client-cert.sh).
+        - alert: EtcdBackupNeverSucceeded
+          # A CronJob that has never succeeded exports no last-success time at
+          # all, so the rule above cannot see it. Hourly job: 3h.
+          expr: |
+            kube_cronjob_created{namespace="hydra-backup", cronjob=~"etcd-backup-.*"}
+            unless on (namespace, cronjob)
+            kube_cronjob_status_last_successful_time{namespace="hydra-backup", cronjob=~"etcd-backup-.*"}
+          for: 3h
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.cronjob }} has never succeeded"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.cronjob }} has existed for over 3 hours without
+              one successful backup. Read its Jobs' logs.
+        - alert: EtcdClientCertCheckNeverSucceeded
+          # The same blind spot for the daily certificate check, with a daily
+          # window: on a fresh install its first run can be up to 24h away, and
+          # a 3h window would page for most of a day. EtcdBackupClientCertExpiring
+          # cannot see a check that never passed (no series), so this one must.
+          expr: |
+            kube_cronjob_created{namespace="hydra-backup", cronjob=~"etcd-client-cert-check-.*"}
+            unless on (namespace, cronjob)
+            kube_cronjob_status_last_successful_time{namespace="hydra-backup", cronjob=~"etcd-client-cert-check-.*"}
+          for: 26h
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.cronjob }} has never succeeded"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.cronjob }} has existed for over 26 hours without
+              one successful run, so the client certificate's expiry is unchecked. Read its
+              Jobs' logs.
+        - alert: EtcdBackupClientCertExpiring
+          # The daily check fails from 30 days before expiry; 26h allows one
+          # late run. Renewing is etcd-backup-client-cert.sh, which takes effect
+          # on the next run of both jobs.
+          expr: |
+            time() - max by (namespace, cronjob) (
+              kube_cronjob_status_last_successful_time{namespace="hydra-backup", cronjob=~"etcd-client-cert-check-.*"}
+            ) > 26 * 3600
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "The etcd backup client certificate expires within 30 days, or cannot be checked"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.cronjob }} has not passed in over 26 hours. Its log
+              gives the expiry date. Renew with etcd-backup-client-cert.sh before it expires, or
+              every backup will start failing.
+        - alert: EtcdBackupNodeDiskFilling
+          # A hostPath PV's capacity is not enforced: the backups are bounded
+          # only by retention, on the node's root filesystem -- which also holds
+          # the management cluster's own etcd. The management node-exporter
+          # (namespace monitoring) runs only on hlcluster-ctrlr0, the node the
+          # backup PV is pinned to; no stock filesystem rule covers it.
+          expr: |
+            node_filesystem_avail_bytes{namespace="monitoring", job="node-exporter", mountpoint="/"}
+              / node_filesystem_size_bytes{namespace="monitoring", job="node-exporter", mountpoint="/"} < 0.15
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Under 15% free on {{ $labels.instance }}, which holds the etcd backups"
+            description: >-
+              {{ $labels.device }} on {{ $labels.instance }} has {{ $value | humanizePercentage }} free.
+              It holds /var/lib/hydra-backup and the management cluster's etcd. Check what is
+              growing before either fills it.
+        - alert: EtcdBackupMetricsMissing
+          # If the exporter itself is gone, the rules above go silent rather
+          # than firing. This makes that silence loud.
+          expr: absent(kube_cronjob_created{namespace="hydra-backup"})
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "No CronJob metrics from hydra-backup; etcd backup alerting is blind"
+            description: >-
+              kube-state-metrics in hydra-backup is not being scraped, so a failing etcd
+              backup would not alert. Check the hydra-backup/kube-state-metrics Deployment and
+              its ServiceMonitor.
