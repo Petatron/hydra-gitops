@@ -96,8 +96,9 @@ metadata:
   namespace: hydra-backup
 data:
   recipients.txt: |
-    # TODO(PET-23): replace with the operator's age public key before applying.
-    REPLACE_WITH_AGE_PUBLIC_KEY
+    # The operator's key (PET-23, 2026-10-16). The private half is offline.
+    # Adding a line adds a recipient; every one listed can decrypt new backups.
+    age1mmeznvnqvwxvsf4tcynj8j6mjt22s5henll8hlx8ca9e6djegdzq7gv9e9
 ---
 apiVersion: v1
 kind: PersistentVolume
