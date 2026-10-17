@@ -188,6 +188,17 @@ spec:
                   value: "48"
                 - name: KEEP_DAILY
                   value: "14"
+                # Members are tried one at a time, so the deadline has to cover
+                # the worst case: every address probed, and every real member
+                # (3 here) passing the probe and then stalling in snapshot save.
+                # With 3 control-plane Machines listing up to 3 IPv4 addresses
+                # each: 9 x 5s + 3 x 240s = 765s, under activeDeadlineSeconds
+                # (900). Raise both together if the database grows: a 17 MB
+                # snapshot takes about 3s, so 240s is roughly 80 times that.
+                - name: HEALTH_TIMEOUT
+                  value: "5s"
+                - name: SNAPSHOT_TIMEOUT
+                  value: "240s"
               # Root, because kubelet creates the hostPath directory root-owned;
               # with every capability dropped it can write there and nothing else.
               securityContext:
