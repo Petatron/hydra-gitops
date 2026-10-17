@@ -73,7 +73,11 @@ spec:
     spec:
       serviceAccountName: kube-state-metrics
       # Beside the backups on the node at home: on a management worker it would
-      # go down with the hypervisor, and that is exactly when it is needed.
+      # go down with the hypervisor, and that is exactly when it is needed. This
+      # only helps because what evaluates and routes the alerts is there too:
+      # radar-monitoring's Prometheus and Alertmanager both run on
+      # hlcluster-ctrlr0 (checked 2026-10-17). A dead-man's switch for that node
+      # itself is PET-64's.
       nodeSelector:
         kubernetes.io/hostname: hlcluster-ctrlr0
       tolerations:
@@ -180,19 +184,37 @@ spec:
               certificate near expiry -- renew with etcd-backup-client-cert.sh).
         - alert: EtcdBackupNeverSucceeded
           # A CronJob that has never succeeded exports no last-success time at
-          # all, so the rule above cannot see it.
+          # all, so the rule above cannot see it. Hourly job: 3h.
           expr: |
-            kube_cronjob_created{namespace="hydra-backup", cronjob=~"etcd-(backup|client-cert-check)-.*"}
+            kube_cronjob_created{namespace="hydra-backup", cronjob=~"etcd-backup-.*"}
             unless on (namespace, cronjob)
-            kube_cronjob_status_last_successful_time{namespace="hydra-backup", cronjob=~"etcd-(backup|client-cert-check)-.*"}
+            kube_cronjob_status_last_successful_time{namespace="hydra-backup", cronjob=~"etcd-backup-.*"}
           for: 3h
           labels:
             severity: critical
           annotations:
-            summary: "{{ $labels.cronjob }} has never completed a backup"
+            summary: "{{ $labels.cronjob }} has never succeeded"
             description: >-
               {{ $labels.namespace }}/{{ $labels.cronjob }} has existed for over 3 hours without
-              one successful run. Read its Jobs' logs.
+              one successful backup. Read its Jobs' logs.
+        - alert: EtcdClientCertCheckNeverSucceeded
+          # The same blind spot for the daily certificate check, with a daily
+          # window: on a fresh install its first run can be up to 24h away, and
+          # a 3h window would page for most of a day. EtcdBackupClientCertExpiring
+          # cannot see a check that never passed (no series), so this one must.
+          expr: |
+            kube_cronjob_created{namespace="hydra-backup", cronjob=~"etcd-client-cert-check-.*"}
+            unless on (namespace, cronjob)
+            kube_cronjob_status_last_successful_time{namespace="hydra-backup", cronjob=~"etcd-client-cert-check-.*"}
+          for: 26h
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.cronjob }} has never succeeded"
+            description: >-
+              {{ $labels.namespace }}/{{ $labels.cronjob }} has existed for over 26 hours without
+              one successful run, so the client certificate's expiry is unchecked. Read its
+              Jobs' logs.
         - alert: EtcdBackupClientCertExpiring
           # The daily check fails from 30 days before expiry; 26h allows one
           # late run. Renewing is etcd-backup-client-cert.sh, which takes effect
@@ -210,6 +232,24 @@ spec:
               {{ $labels.namespace }}/{{ $labels.cronjob }} has not passed in over 26 hours. Its log
               gives the expiry date. Renew with etcd-backup-client-cert.sh before it expires, or
               every backup will start failing.
+        - alert: EtcdBackupNodeDiskFilling
+          # A hostPath PV's capacity is not enforced: the backups are bounded
+          # only by retention, on the node's root filesystem -- which also holds
+          # the management cluster's own etcd. The management node-exporter
+          # (namespace monitoring) runs only on hlcluster-ctrlr0, the node the
+          # backup PV is pinned to; no stock filesystem rule covers it.
+          expr: |
+            node_filesystem_avail_bytes{namespace="monitoring", job="node-exporter", mountpoint="/"}
+              / node_filesystem_size_bytes{namespace="monitoring", job="node-exporter", mountpoint="/"} < 0.15
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Under 15% free on {{ $labels.instance }}, which holds the etcd backups"
+            description: >-
+              {{ $labels.device }} on {{ $labels.instance }} has {{ $value | humanizePercentage }} free.
+              It holds /var/lib/hydra-backup and the management cluster's etcd. Check what is
+              growing before either fills it.
         - alert: EtcdBackupMetricsMissing
           # If the exporter itself is gone, the rules above go silent rather
           # than firing. This makes that silence loud.

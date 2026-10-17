@@ -50,6 +50,13 @@
 # VM. Do NOT let it fall back to the default StorageClass -- the management
 # cluster's workers are VMs on that same hypervisor, and a backup there is not
 # off-host. The PV's nodeAffinity is what places the job on the right node.
+#
+# Off-host is not durable: this is ONE copy, on one node's disk. Lose
+# hlcluster-ctrlr0 and every backup goes with it. A second, off-site copy is a
+# deliberate follow-up, not part of this first iteration. And a hostPath PV's
+# capacity is not enforced -- retention is the only bound (about 62 files, ~17 MB
+# each today) -- so EtcdBackupNodeDiskFilling watches that node's root
+# filesystem, which also holds the management cluster's own etcd.
 ---
 apiVersion: v1
 kind: Namespace
