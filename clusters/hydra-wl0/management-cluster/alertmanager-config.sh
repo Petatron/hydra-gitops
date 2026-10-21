@@ -33,8 +33,8 @@ for placeholder in __SMTP_PASSWORD__ __HEARTBEAT_URL__ __HEARTBEAT_EMAIL__; do
 done
 [ -t 0 ] || { echo "run this from a terminal: it prompts for credentials" >&2; exit 1; }
 kubectl -n "$NS" get pod "$POD" >/dev/null || { echo "cannot reach $NS/$POD" >&2; exit 1; }
-# replace below rewrites the whole Secret. Refuse if it is missing, or if it
-# holds anything besides the configuration, which replace would drop.
+# Refuse if the Secret is missing, or if it holds anything besides the
+# configuration: this script owns that one key and nothing else.
 keys=$(kubectl -n "$NS" get secret "$SECRET" -o go-template='{{range $k, $v := .data}}{{$k}} {{end}}') ||
 	{ echo "cannot read $NS/$SECRET" >&2; exit 1; }
 [ "$keys" = "alertmanager.yaml " ] ||
@@ -121,12 +121,18 @@ if [ "$stored" = "$wanted" ]; then
 fi
 stored= wanted=
 
-# replace, not apply: apply would keep a second copy of the whole Secret,
-# credentials included, in its last-applied annotation.
+# Server-side apply: it leaves metadata other tools set on the Secret alone
+# (labels and annotations added by kubectl label/annotate or a controller),
+# and unlike client-side apply it keeps no second copy of the data,
+# credentials included, in a last-applied-configuration annotation. The first
+# run takes over what an earlier client-side apply owned, so labels that apply
+# set are dropped (the live Secret had none). Then drop the annotation that
+# apply left, which holds an old copy of the config.
 printf '%s\n' "$CONFIG" |
 	kubectl -n "$NS" create secret generic "$SECRET" --from-file=alertmanager.yaml=/dev/stdin \
 		--dry-run=client -o yaml |
-	kubectl replace -f - >/dev/null
+	kubectl apply --server-side --force-conflicts --field-manager=hydra-alertmanager-config -f - >/dev/null
+kubectl -n "$NS" annotate secret "$SECRET" kubectl.kubernetes.io/last-applied-configuration- >/dev/null
 CONFIG=
 echo "Stored $NS/$SECRET. Waiting for Alertmanager to load it..." >&2
 

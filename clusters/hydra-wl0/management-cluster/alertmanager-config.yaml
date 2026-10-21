@@ -109,13 +109,15 @@ inhibit_rules:
   # HydraCluster goes not-Ready, the provider's reconciles fail, and the hourly
   # backups of hydra-wl0 cannot reach its etcd.
   - source_matchers: ['alertname = HydraSiteLinkDown']
-    target_matchers: ['alertname =~ "Hydra(HypervisorUnreachable|BackendUnreachable|ProviderReconcileErrors|ClusterAPIUnreachable|ClusterNotAvailable|ClusterNotReady|NodeUnhealthy|ControlPlaneNodeUnhealthy|NodeFlapping|MachineNotReady|ControlPlaneMachineNotReady|EtcdUnhealthy|ControlPlaneQuorumLost|ControlPlaneDegraded|ManagementNodeNotReady|Wl0NoTelemetry|Wl0ExporterDown)|EtcdBackup.+|EtcdClientCert.+"']
-  # The hypervisor down: every VM on it is down, which is the same news.
-  - source_matchers: ['alertname = HydraHypervisorUnreachable']
-    target_matchers: ['alertname =~ "Hydra(BackendUnreachable|ProviderReconcileErrors|ClusterAPIUnreachable|ClusterNotAvailable|ClusterNotReady|NodeUnhealthy|ControlPlaneNodeUnhealthy|NodeFlapping|MachineNotReady|ControlPlaneMachineNotReady|EtcdUnhealthy|ControlPlaneQuorumLost|ControlPlaneDegraded|ManagementNodeNotReady|Wl0NoTelemetry|Wl0ExporterDown)|EtcdBackup.+|EtcdClientCert.+"']
+    target_matchers: ['alertname =~ "Hydra(HypervisorUnreachable|BackendUnreachable|ProviderReconcileErrors|ClusterAPIUnreachable|ClusterNotAvailable|ClusterNotReady|NodeUnhealthy|ControlPlaneNodeUnhealthy|NodeFlapping|MachineNotReady|ControlPlaneMachineNotReady|EtcdUnhealthy|ControlPlaneUnavailable|ControlPlaneDegraded|ManagementNodeNotReady|Wl0NoTelemetry|Wl0ExporterDown)|EtcdBackup.+|EtcdClientCert.+"']
+  # The hypervisor down: every VM on it is down, which is the same news. Only the
+  # ping probe justifies that. A closed libvirt port alone means libvirtd is
+  # down with the host and its VMs up, and must not hide what happens to them.
+  - source_matchers: ['alertname = HydraHypervisorUnreachable', 'job = hydra-hypervisor-icmp']
+    target_matchers: ['alertname =~ "Hydra(BackendUnreachable|ProviderReconcileErrors|ClusterAPIUnreachable|ClusterNotAvailable|ClusterNotReady|NodeUnhealthy|ControlPlaneNodeUnhealthy|NodeFlapping|MachineNotReady|ControlPlaneMachineNotReady|EtcdUnhealthy|ControlPlaneUnavailable|ControlPlaneDegraded|ManagementNodeNotReady|Wl0NoTelemetry|Wl0ExporterDown)|EtcdBackup.+|EtcdClientCert.+"']
   # A cluster's API unreachable: Cluster API cannot see its nodes or etcd either.
   - source_matchers: ['alertname = HydraClusterAPIUnreachable']
-    target_matchers: ['alertname =~ "Hydra(ClusterNotAvailable|NodeUnhealthy|ControlPlaneNodeUnhealthy|EtcdUnhealthy|ControlPlaneQuorumLost|ControlPlaneDegraded)"']
+    target_matchers: ['alertname =~ "Hydra(ClusterNotAvailable|NodeUnhealthy|ControlPlaneNodeUnhealthy|EtcdUnhealthy|ControlPlaneUnavailable|ControlPlaneDegraded)"']
     equal: [cluster_name]
 
 receivers:

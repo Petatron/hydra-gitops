@@ -79,7 +79,7 @@ subjects:
 # KubeadmControlPlane, copied unchanged from kubernetes-sigs/cluster-api
 # core/config/metrics/crd-metrics-config.yaml at release-1.14 (b93a90ef6ddc),
 # followed by cluster-api-provider-hydra's config/metrics/crd-metrics-config.yaml
-# (HydraCluster, HydraMachine) at 260a5af (PET-64).
+# (HydraCluster, HydraMachine) at f2cfb95 (PET-64).
 # kube-state-metrics takes a single config file, hence one document. Re-copy both
 # when either changes; the metric names are what the rules in hydra-alerts.yaml read.
 # The key has no .yaml suffix on purpose: the validator reads such keys as
