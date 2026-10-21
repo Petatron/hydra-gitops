@@ -67,6 +67,7 @@ clusters/hydra-wl0/
 ├── apps/                          # Cilium, shared storage, autoscaler Applications
 ├── cluster-autoscaler/            # Workload Deployment, RBAC, setup runbook
 └── management-cluster/            # Apply manually to management; never via Argo
+                                   # (autoscaler RBAC, etcd backups, alerting)
 ```
 
 ## Bootstrap and manual prerequisites
@@ -116,6 +117,22 @@ Repeat credential setup after loss or rotation; Argo CD does not recreate that
 untracked Secret. Verify actual node-group discovery in autoscaler logs, since
 pod readiness alone does not establish that autoscaling works. Existing
 scale-down policy remains disabled pending PET-13.
+
+**Alerting runs on the management cluster, outside Argo CD too (PET-64).** From
+`clusters/hydra-wl0/management-cluster/`, in this order:
+
+1. `kubectl apply -f hydra-monitoring.yaml`: the collectors the alerts read
+   (kube-state-metrics for nodes and Cluster API/Hydra objects, the controller
+   scrapes, blackbox probes of the office gateway and hypervisor).
+2. `kubectl apply -f hydra-alerts.yaml`: the provider's rules, copied from
+   cluster-api-provider-hydra, and the lab's own.
+3. `sh alertmanager-config.sh`, run by a person: it prompts for the Google app
+   password and the two healthchecks.io heartbeats, then installs
+   `alertmanager-config.yaml` as Alertmanager's configuration. Credentials go
+   from the prompt to the cluster through pipes, never to Git or disk.
+
+That Alertmanager is shared with radar (project-silkroad); this template is now
+the source of its configuration, for both projects.
 
 For the Argo CD UI, substitute the intended cluster context:
 
