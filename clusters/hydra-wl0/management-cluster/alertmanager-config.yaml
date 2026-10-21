@@ -4,19 +4,25 @@
 #
 #   sh alertmanager-config.sh
 #
-# which prompts for the three credentials below, checks the result with
+# which prompts for the four values below, checks the result with
 # amtool, and stores it as the Secret monitoring/alertmanager-radar-alertmanager
 # (key alertmanager.yaml), where the radar-monitoring Helm release's
 # useExistingSecret points the operator. The credentials go from the prompt to
 # the cluster through pipes only; they are never written to disk or to git.
 #
-#   SMTP_PASSWORD    a Google app password for yibo@foresightcares.com
+#   SMTP_SENDER      the dedicated Workspace account alerts are sent from
+#   SMTP_PASSWORD    a Google app password for that account
 #   HEARTBEAT_URL    healthchecks.io ping URL of the "alertmanager alive" check
 #   HEARTBEAT_EMAIL  healthchecks.io ping email of the "alert email path" check
 #
 # Each appears below once, as the placeholder of the same name between double
 # underscores. Name them only that way where a value belongs: the script
 # replaces every occurrence, comments included.
+#
+# Alerts are sent from a dedicated account, not a person's: a Google app
+# password opens the whole mailbox over IMAP, not just SMTP, and this one sits
+# in a Secret. A sender mailbox holds nothing worth reading. Alerts still go to
+# yibo@foresightcares.com.
 # ############################################################################
 #
 # One Alertmanager serves two projects (PET-64): radar (project-silkroad) and
@@ -39,8 +45,9 @@
 global:
   resolve_timeout: 5m
   smtp_smarthost: 'smtp.gmail.com:587'
-  smtp_from: 'yibo@foresightcares.com'
-  smtp_auth_username: 'yibo@foresightcares.com'
+  # One placeholder, two fields: the anchor repeats it.
+  smtp_from: &sender '__SMTP_SENDER__'
+  smtp_auth_username: *sender
   smtp_auth_password: '__SMTP_PASSWORD__'
   smtp_require_tls: true
 

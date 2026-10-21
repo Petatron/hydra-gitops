@@ -126,8 +126,9 @@ scale-down policy remains disabled pending PET-13.
    scrapes, blackbox probes of the office gateway and hypervisor).
 2. `kubectl apply -f hydra-alerts.yaml`: the provider's rules, copied from
    cluster-api-provider-hydra, and the lab's own.
-3. `sh alertmanager-config.sh`, run by a person: it prompts for the Google app
-   password and the two healthchecks.io heartbeats, then installs
+3. `sh alertmanager-config.sh`, run by a person: it prompts for the dedicated
+   alert sender account, its Google app password and the two healthchecks.io
+   heartbeats, then installs
    `alertmanager-config.yaml` as Alertmanager's configuration. Credentials go
    from the prompt to the cluster through pipes, never to Git or disk.
 

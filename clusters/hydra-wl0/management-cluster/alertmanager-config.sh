@@ -5,7 +5,7 @@
 #   sh alertmanager-config.sh
 # ############################################################################
 #
-# Renders alertmanager-config.yaml with its three credentials and installs the
+# Renders alertmanager-config.yaml with its sender and three credentials and installs the
 # result as the management cluster's Alertmanager configuration (PET-64): the
 # Secret monitoring/alertmanager-radar-alertmanager, key alertmanager.yaml.
 #
@@ -27,7 +27,7 @@ TEMPLATE=$(dirname "$0")/alertmanager-config.yaml
 [ -r "$TEMPLATE" ] || { echo "cannot read $TEMPLATE" >&2; exit 1; }
 # Every placeholder is replaced wherever it appears, comments included, so each
 # must appear exactly once: where its value belongs.
-for placeholder in __SMTP_PASSWORD__ __HEARTBEAT_URL__ __HEARTBEAT_EMAIL__; do
+for placeholder in __SMTP_SENDER__ __SMTP_PASSWORD__ __HEARTBEAT_URL__ __HEARTBEAT_EMAIL__; do
 	[ "$(grep -c "$placeholder" "$TEMPLATE")" -eq 1 ] ||
 		{ echo "$TEMPLATE must contain $placeholder exactly once" >&2; exit 1; }
 done
@@ -60,7 +60,17 @@ fail() {
 	exit 1
 }
 
-ask SMTP_PASSWORD "Google app password for yibo@foresightcares.com"
+# The sender is not a secret, so it is echoed.
+printf '%s: ' "Address of the dedicated alert sender account" >&2
+IFS= read -r SMTP_SENDER || SMTP_SENDER=
+case $SMTP_SENDER in
+*[!a-z0-9._@-]* | '') fail "the sender is a plain address like alerts@foresightcares.com" ;;
+yibo@foresightcares.com) fail "use the dedicated sender account, not a personal mailbox" ;;
+?*@foresightcares.com) ;;
+*) fail "the sender is an @foresightcares.com Workspace account" ;;
+esac
+
+ask SMTP_PASSWORD "Google app password for $SMTP_SENDER"
 # Google shows it in four groups of four; the spaces are not part of it.
 SMTP_PASSWORD=$(printf '%s' "$SMTP_PASSWORD" | tr -d ' ')
 case $SMTP_PASSWORD in *[!a-z]* | '') fail "an app password is 16 lowercase letters" ;; esac
@@ -87,16 +97,17 @@ done
 # Exported for awk's ENVIRON, the one place the values leave this shell. For
 # the instant awk runs they are readable in its /proc/<pid>/environ, by this
 # user and root only; never in an argument list.
-export SMTP_PASSWORD HEARTBEAT_URL HEARTBEAT_EMAIL
+export SMTP_SENDER SMTP_PASSWORD HEARTBEAT_URL HEARTBEAT_EMAIL
 CONFIG=$(awk '{
+	gsub(/__SMTP_SENDER__/, ENVIRON["SMTP_SENDER"])
 	gsub(/__SMTP_PASSWORD__/, ENVIRON["SMTP_PASSWORD"])
 	gsub(/__HEARTBEAT_URL__/, ENVIRON["HEARTBEAT_URL"])
 	gsub(/__HEARTBEAT_EMAIL__/, ENVIRON["HEARTBEAT_EMAIL"])
 	print
 }' "$TEMPLATE")
-unset SMTP_PASSWORD HEARTBEAT_URL HEARTBEAT_EMAIL
+unset SMTP_SENDER SMTP_PASSWORD HEARTBEAT_URL HEARTBEAT_EMAIL
 
-case $CONFIG in *__SMTP_PASSWORD__* | *__HEARTBEAT_URL__* | *__HEARTBEAT_EMAIL__*)
+case $CONFIG in *__SMTP_SENDER__* | *__SMTP_PASSWORD__* | *__HEARTBEAT_URL__* | *__HEARTBEAT_EMAIL__*)
 	fail "a placeholder was left unfilled" ;;
 esac
 
