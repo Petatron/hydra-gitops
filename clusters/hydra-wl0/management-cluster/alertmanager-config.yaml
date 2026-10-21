@@ -1,0 +1,169 @@
+# ############################################################################
+# THE MANAGEMENT CLUSTER'S ALERTMANAGER CONFIGURATION -- A TEMPLATE, NOT A
+# KUBERNETES OBJECT. Render and install it with:
+#
+#   sh alertmanager-config.sh
+#
+# which prompts for the four values below, checks the result with
+# amtool, and stores it as the Secret monitoring/alertmanager-radar-alertmanager
+# (key alertmanager.yaml), where the radar-monitoring Helm release's
+# useExistingSecret points the operator. The credentials go from the prompt to
+# the cluster through pipes only; they are never written to disk or to git.
+#
+#   SMTP_SENDER      the dedicated Google account alerts are sent from
+#   SMTP_PASSWORD    a Google app password for that account
+#   HEARTBEAT_URL    healthchecks.io ping URL of the "alertmanager alive" check
+#   HEARTBEAT_EMAIL  healthchecks.io ping email of the "alert email path" check
+#
+# Each appears below once, as the placeholder of the same name between double
+# underscores. Name them only that way where a value belongs: the script
+# replaces every occurrence, comments included.
+#
+# Alerts are sent from a dedicated account, not a person's: a Google app
+# password opens the whole mailbox over IMAP, not just SMTP, and this one sits
+# in a Secret. A sender mailbox holds nothing worth reading. Alerts still go to
+# yibo@foresightcares.com.
+# ############################################################################
+#
+# One Alertmanager serves two projects (PET-64): radar (project-silkroad) and
+# Hydra. This file now owns both. It started as radar's template from
+# project-silkroad (deploy/bin/secrets.sh management-alertmanager); running that
+# script again would overwrite the Hydra routes and the heartbeat, so it is no
+# longer used for Alertmanager.
+#
+# Nothing here had ever reached a person before PET-64: the receivers pointed at
+# operator@example.invalid via smtp.example.invalid, and
+# AlertmanagerFailedToSendAlerts fired from 2026-10-06 until this replaced it.
+#
+# Watching the watcher. Watchdog always fires. It goes to two healthchecks.io
+# checks, each of which emails yibo@ from healthchecks.io's side when it stops:
+#   - "alertmanager alive", pinged over HTTPS every minute: catches this
+#     Alertmanager, its Prometheus, hlcluster-ctrlr0, and home power or internet;
+#   - "alert email path", pinged hourly by an email sent the same way as every
+#     alert: catches a revoked app password or Gmail refusing to send, the
+#     failure that kept every alert silent for two weeks.
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'smtp.gmail.com:587'
+  # One placeholder, two fields: the anchor repeats it.
+  smtp_from: &sender '__SMTP_SENDER__'
+  smtp_auth_username: *sender
+  smtp_auth_password: '__SMTP_PASSWORD__'
+  smtp_require_tls: true
+
+route:
+  receiver: radar-email
+  # Grouped so one overheating chassis is one message naming three GPUs, not three
+  # messages -- but a second, different alert still arrives on its own.
+  group_by: [alertname, cluster]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  routes:
+    # The dead-man's switch: the always-firing Watchdog, to both heartbeat checks.
+    # repeat_interval is below group_interval on purpose. Alertmanager stamps a
+    # send when it completes, so with the two equal the next tick finds it a
+    # moment too recent and skips it: one ping every two minutes, not every
+    # minute. Shorter than the tick, every tick sends.
+    - receiver: heartbeat-alive
+      matchers: ['alertname = Watchdog']
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 30s
+      continue: true
+    - receiver: heartbeat-email
+      matchers: ['alertname = Watchdog']
+      group_wait: 0s
+      group_interval: 5m
+      repeat_interval: 55m
+    - receiver: 'null'
+      matchers: ['alertname = InfoInhibitor']
+    # The adopted Cluster "hydra" has no control-plane Machine, so Cluster API can
+    # never mark it Available (PET-61). Its nodes stay covered by
+    # HydraManagementNodeNotReady and HydraMachineNotReady.
+    - receiver: 'null'
+      matchers: ['alertname = HydraClusterNotAvailable', 'name = hydra']
+    # Hydra: everything from the provider's rules, the lab rules and the etcd backups.
+    - receiver: hydra-email
+      matchers: ['alertname =~ "Hydra.+|EtcdBackup.+|EtcdClientCert.+"']
+      group_by: [alertname, cluster_name]
+      routes:
+        - receiver: hydra-email-critical
+          matchers: ['severity = critical']
+          group_wait: 10s
+          group_interval: 5m
+          repeat_interval: 1h
+    # The two questions worth interrupting a day: the box is gone, a GPU is cooking, a
+    # run has failed. Faster out, and repeated hourly until acknowledged or resolved.
+    - receiver: radar-email-critical
+      matchers: ['severity = critical']
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 1h
+
+inhibit_rules:
+  # When the machine is gone, everything on it is gone: exporters unscrapable, Jobs
+  # unknown, GPUs silent. Send the one alert that explains the rest.
+  - source_matchers: ['alertname = HydraWl0NoTelemetry']
+    target_matchers: ['cluster = hydra-wl0', 'alertname != HydraWl0NoTelemetry']
+    equal: [cluster]
+  # A critical alert about a node suppresses the warning about the same node.
+  - source_matchers: ['severity = critical']
+    target_matchers: ['severity = warning']
+    equal: [alertname, cluster, node]
+  # The link to the office down: every office machine is unreachable, so say that once.
+  # The lists name what an office outage causes, including the slow ones: the
+  # HydraCluster goes not-Ready, the provider's reconciles fail, and the hourly
+  # backups of hydra-wl0 cannot reach its etcd.
+  - source_matchers: ['alertname = HydraSiteLinkDown']
+    target_matchers: ['alertname =~ "Hydra(HypervisorUnreachable|BackendUnreachable|ProviderReconcileErrors|ClusterAPIUnreachable|ClusterNotAvailable|ClusterNotReady|NodeUnhealthy|ControlPlaneNodeUnhealthy|NodeFlapping|MachineNotReady|ControlPlaneMachineNotReady|EtcdUnhealthy|ControlPlaneUnavailable|ControlPlaneDegraded|ManagementNodeNotReady|Wl0NoTelemetry|Wl0ExporterDown)|EtcdBackup.+|EtcdClientCert.+"']
+  # The hypervisor down: every VM on it is down, which is the same news. Only the
+  # ping probe justifies that. A closed libvirt port alone means libvirtd is
+  # down with the host and its VMs up, and must not hide what happens to them.
+  - source_matchers: ['alertname = HydraHypervisorUnreachable', 'job = hydra-hypervisor-icmp']
+    target_matchers: ['alertname =~ "Hydra(BackendUnreachable|ProviderReconcileErrors|ClusterAPIUnreachable|ClusterNotAvailable|ClusterNotReady|NodeUnhealthy|ControlPlaneNodeUnhealthy|NodeFlapping|MachineNotReady|ControlPlaneMachineNotReady|EtcdUnhealthy|ControlPlaneUnavailable|ControlPlaneDegraded|ManagementNodeNotReady|Wl0NoTelemetry|Wl0ExporterDown)|EtcdBackup.+|EtcdClientCert.+"']
+  # A cluster's API unreachable: Cluster API cannot see its nodes or etcd either.
+  - source_matchers: ['alertname = HydraClusterAPIUnreachable']
+    target_matchers: ['alertname =~ "Hydra(ClusterNotAvailable|NodeUnhealthy|ControlPlaneNodeUnhealthy|EtcdUnhealthy|ControlPlaneUnavailable|ControlPlaneDegraded)"']
+    equal: [cluster_name]
+
+receivers:
+  - name: 'null'
+
+  - name: radar-email
+    email_configs:
+      - to: 'yibo@foresightcares.com'
+        send_resolved: true
+        headers:
+          Subject: '[radar] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }} ({{ .Alerts | len }})'
+
+  - name: radar-email-critical
+    email_configs:
+      - to: 'yibo@foresightcares.com'
+        send_resolved: true
+        headers:
+          Subject: '[radar CRITICAL] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }} ({{ .Alerts | len }})'
+
+  - name: hydra-email
+    email_configs:
+      - to: 'yibo@foresightcares.com'
+        send_resolved: true
+        headers:
+          Subject: '[hydra] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }} ({{ .Alerts | len }})'
+
+  - name: hydra-email-critical
+    email_configs:
+      - to: 'yibo@foresightcares.com'
+        send_resolved: true
+        headers:
+          Subject: '[hydra CRITICAL] {{ .Status | toUpper }}: {{ .CommonLabels.alertname }} ({{ .Alerts | len }})'
+
+  - name: heartbeat-alive
+    webhook_configs:
+      - url: '__HEARTBEAT_URL__'
+        send_resolved: false
+
+  - name: heartbeat-email
+    email_configs:
+      - to: '__HEARTBEAT_EMAIL__'
+        send_resolved: false
