@@ -10,7 +10,7 @@
 # useExistingSecret points the operator. The credentials go from the prompt to
 # the cluster through pipes only; they are never written to disk or to git.
 #
-#   SMTP_SENDER      the dedicated Workspace account alerts are sent from
+#   SMTP_SENDER      the dedicated Google account alerts are sent from
 #   SMTP_PASSWORD    a Google app password for that account
 #   HEARTBEAT_URL    healthchecks.io ping URL of the "alertmanager alive" check
 #   HEARTBEAT_EMAIL  healthchecks.io ping email of the "alert email path" check

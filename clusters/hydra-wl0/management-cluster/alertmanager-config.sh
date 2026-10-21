@@ -63,11 +63,14 @@ fail() {
 # The sender is not a secret, so it is echoed.
 printf '%s: ' "Address of the dedicated alert sender account" >&2
 IFS= read -r SMTP_SENDER || SMTP_SENDER=
+# Any Google account works with smtp.gmail.com (a Workspace domain or a
+# gmail.com address); another provider needs smtp_smarthost changed in the
+# template, and its password rules below.
 case $SMTP_SENDER in
-*[!a-z0-9._@-]* | '') fail "the sender is a plain address like alerts@foresightcares.com" ;;
+*[!a-z0-9._@+-]* | '') fail "the sender is a plain lowercase address like hydra.alerts@gmail.com" ;;
 yibo@foresightcares.com) fail "use the dedicated sender account, not a personal mailbox" ;;
-?*@foresightcares.com) ;;
-*) fail "the sender is an @foresightcares.com Workspace account" ;;
+?*@?*.?*) ;;
+*) fail "the sender is an email address" ;;
 esac
 
 ask SMTP_PASSWORD "Google app password for $SMTP_SENDER"
