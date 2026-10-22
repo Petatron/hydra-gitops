@@ -78,11 +78,6 @@ route:
       repeat_interval: 55m
     - receiver: 'null'
       matchers: ['alertname = InfoInhibitor']
-    # The adopted Cluster "hydra" has no control-plane Machine, so Cluster API can
-    # never mark it Available (PET-61). Its nodes stay covered by
-    # HydraManagementNodeNotReady and HydraMachineNotReady.
-    - receiver: 'null'
-      matchers: ['alertname = HydraClusterNotAvailable', 'name = hydra']
     # Hydra: everything from the provider's rules, the lab rules and the etcd backups.
     - receiver: hydra-email
       matchers: ['alertname =~ "Hydra.+|EtcdBackup.+|EtcdClientCert.+"']
