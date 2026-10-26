@@ -8,8 +8,8 @@
 # Hydra's alerts (PET-64), in two PrometheusRules.
 #
 # cluster-api-provider-hydra is the provider's own rule set, copied from
-# cluster-api-provider-hydra config/prometheus/alerts.yaml at 7af4f97 (PET-64)
-# with only metadata changed. Its unit tests and runbook (docs/alerts.md) live
+# cluster-api-provider-hydra config/prometheus/alerts.yaml at 5346d1a (PET-73;
+# first copied at 7af4f97 for PET-64) with only metadata changed. Its unit tests and runbook (docs/alerts.md) live
 # there; change it there and copy it back here, never the other way round.
 #
 # hydra-lab is this site only: the inter-site link, the office hypervisor, the
@@ -43,14 +43,14 @@ spec:
         runbook_url: https://github.com/Petatron/cluster-api-provider-hydra/blob/main/docs/alerts.md#hydraproviderdown
     - alert: HydraBackendUnreachable
       expr: |
-        sum by (job) (increase(hydra_provider_operation_duration_seconds_count{outcome="error"}[15m])) > 0
-        unless on (job)
-        sum by (job) (increase(hydra_provider_operation_duration_seconds_count{outcome!="error"}[15m])) > 0
+        sum by (job, hypervisor) (increase(hydra_provider_operation_duration_seconds_count{outcome="error"}[15m])) > 0
+        unless on (job, hypervisor)
+        sum by (job, hypervisor) (increase(hydra_provider_operation_duration_seconds_count{outcome!="error"}[15m])) > 0
       for: 5m
       labels:
         severity: critical
       annotations:
-        summary: Every call the Hydra provider made to its hypervisor in 15 minutes failed
+        summary: Every call the Hydra provider made to hypervisor {{ $labels.hypervisor }} in 15 minutes failed
         description: >-
           The provider reaches its backend at least every 5 minutes per machine,
           and for the last 15 minutes every call ended in a connection error
