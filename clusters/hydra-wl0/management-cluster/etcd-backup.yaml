@@ -273,6 +273,15 @@ spec:
         spec:
           restartPolicy: Never
           automountServiceAccountToken: false
+          # Unlike the backup above, nothing pins this to a node -- so it can land
+          # on any, and once the management cluster has no workers left (PET-74
+          # retires the adopted cluster's two) the control plane is the only
+          # node there is. Without this it would sit Pending, and the warning it
+          # exists to give would simply stop.
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
