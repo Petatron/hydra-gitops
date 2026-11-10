@@ -1,0 +1,254 @@
+# ############################################################################
+# APPLIED TO hlcluster, THE MANAGEMENT CLUSTER'S OFF-HOST OBSERVER -- NOT to
+# hydra-mgmt or hydra-wl0. Nothing here is synced by Argo CD. Apply by hand,
+# AFTER etcd-backup.yaml, which creates the namespace, the ServiceAccount, the
+# Machine-listing Role and the age recipients this file reuses:
+#
+#   kubectl --context <hlcluster> apply -f etcd-backup-hydra-mgmt.yaml
+# ############################################################################
+#
+# Hourly etcd backups of hydra-mgmt, the management cluster Cluster API built
+# (PET-70, ADR-007). The same image and job as hydra-wl0's -- etcd-backup.yaml
+# says what a run does and why -- pointed at the other cluster.
+#
+# Why here: hydra-mgmt's control plane runs as VMs on the office hypervisor,
+# the same host that runs every machine it manages. Lose that host and the
+# backup has to be somewhere else. hlcluster-ctrlr0, at a different site, is
+# that somewhere (ADR-007 D4), as it already is for hydra-wl0.
+#
+# Until the PET-74 pivot, hydra-mgmt's Cluster API objects -- its Machines and
+# its etcd CA, Secret default/hydra-mgmt-etcd -- live on hlcluster, so the job
+# finds the members exactly as hydra-wl0's does. After the pivot they live on
+# hydra-mgmt itself, and both jobs must list Machines from hydra-mgmt's API
+# instead (KUBE_API and SA_DIR; PET-70 phase B). The client certificate keeps
+# working across the move: the CA is the same, only its Secret moves.
+#
+# Out-of-band steps, in order, against hlcluster:
+#   1. kubectl apply -f etcd-backup-hydra-mgmt.yaml
+#   2. ./etcd-backup-client-cert.sh hydra-mgmt
+#   3. kubectl -n hydra-backup create job --from=cronjob/etcd-backup-hydra-mgmt first-run-mgmt
+#      and read its log: one "wrote ..." line, no ERROR.
+#   4. Prove it restores: decrypt one .db.age with the offline key and run
+#      `etcdutl snapshot status` on it, as for hydra-wl0.
+#
+# The alerts in etcd-backup-alerts.yaml match every etcd-backup-* and
+# etcd-client-cert-check-* CronJob in hydra-backup, so these are covered with
+# no change there.
+#
+# The same caveat as hydra-wl0's: this is ONE copy, on the disk that also
+# holds hydra-wl0's backups and hlcluster's own etcd. A second, off-site copy
+# is a deliberate follow-up.
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: etcd-backup-hydra-mgmt
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes: ["ReadWriteOnce"]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  claimRef:
+    namespace: hydra-backup
+    name: etcd-backup-hydra-mgmt
+  hostPath:
+    path: /var/lib/hydra-backup/hydra-mgmt
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: ["hlcluster-ctrlr0"]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: etcd-backup-hydra-mgmt
+  namespace: hydra-backup
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: ""
+  volumeName: etcd-backup-hydra-mgmt
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup-hydra-mgmt
+  namespace: hydra-backup
+spec:
+  # Half an hour from etcd-backup-hydra-wl0 (:07), so the two runs never
+  # overlap on the node, the disk or the office link.
+  schedule: "37 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          serviceAccountName: etcd-backup
+          restartPolicy: Never
+          # The PV's nodeAffinity pins the pod to the node holding the backups;
+          # that node is a control-plane node here, hence the toleration.
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          securityContext:
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: etcd-backup
+              # Published by cluster-api-provider-hydra's release workflow for the
+              # merge of tools/etcd-backup (#41, 265a111). Bump with that repo.
+              image: ghcr.io/petatron/cluster-api-provider-hydra-etcd-backup:sha-265a11121d89
+              env:
+                - name: CLUSTER_NAME
+                  value: hydra-mgmt
+                - name: CLUSTER_NAMESPACE
+                  value: default
+                - name: KEEP_HOURLY
+                  value: "48"
+                - name: KEEP_DAILY
+                  value: "14"
+                # Members are tried one at a time, so the deadline has to cover
+                # the worst case: every address probed, and every real member
+                # (3 here) passing the probe and then stalling in snapshot save.
+                # With 3 control-plane Machines listing up to 3 IPv4 addresses
+                # each: 9 x 5s + 3 x 240s = 765s, under activeDeadlineSeconds
+                # (900). Raise both together if the database grows: a 17 MB
+                # snapshot takes about 3s, so 240s is roughly 80 times that.
+                - name: HEALTH_TIMEOUT
+                  value: "5s"
+                - name: SNAPSHOT_TIMEOUT
+                  value: "240s"
+              # Root, because kubelet creates the hostPath directory root-owned;
+              # with every capability dropped it can write there and nothing else.
+              securityContext:
+                runAsUser: 0
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  # The memory-backed /work holds one plaintext snapshot and
+                  # counts against this. hydra-mgmt's database is 17 MB today; a
+                  # snapshot outgrowing the sizeLimit fails the run loudly.
+                  memory: 768Mi
+              volumeMounts:
+                - name: backup
+                  mountPath: /backup
+                - name: work
+                  mountPath: /work
+                - name: tmp
+                  mountPath: /tmp
+                - name: client
+                  mountPath: /etc/etcd-backup/client
+                  readOnly: true
+                - name: age
+                  mountPath: /etc/etcd-backup/age
+                  readOnly: true
+          volumes:
+            - name: backup
+              persistentVolumeClaim:
+                claimName: etcd-backup-hydra-mgmt
+            - name: work
+              emptyDir:
+                medium: Memory
+                sizeLimit: 512Mi
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Mi
+            - name: client
+              secret:
+                secretName: etcd-backup-hydra-mgmt-client
+                defaultMode: 0400
+            - name: age
+              configMap:
+                name: etcd-backup-age-recipients
+---
+# Daily: fails when the client certificate above expires within 30 days, so
+# EtcdBackupClientCertExpiring fires with a month to spare. A separate job, not
+# a failure of the backup itself, which would hide a real backup failure under
+# an alert that is already firing.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-client-cert-check-hydra-mgmt
+  namespace: hydra-backup
+spec:
+  schedule: "47 6 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          # Unlike the backup above, nothing pins this to a node -- so it can land
+          # on any, and once the management cluster has no workers left (PET-74
+          # retires the adopted cluster's two) the control plane is the only
+          # node there is. Without this it would sit Pending, and the warning it
+          # exists to give would simply stop.
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: check-cert
+              # Same tag as etcd-backup-hydra-mgmt above.
+              image: ghcr.io/petatron/cluster-api-provider-hydra-etcd-backup:sha-265a11121d89
+              env:
+                - name: MODE
+                  value: check-cert
+                - name: CERT_WARN_DAYS
+                  value: "30"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  memory: 64Mi
+              volumeMounts:
+                - name: client
+                  mountPath: /etc/etcd-backup/client
+                  readOnly: true
+          volumes:
+            - name: client
+              secret:
+                secretName: etcd-backup-hydra-mgmt-client
+                # Readable by the non-root user; the private key is not read.
+                items:
+                  - key: tls.crt
+                    path: tls.crt
