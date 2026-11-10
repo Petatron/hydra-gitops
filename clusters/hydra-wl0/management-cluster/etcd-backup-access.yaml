@@ -1,0 +1,68 @@
+# ############################################################################
+# APPLIED TO hydra-mgmt -- not to hlcluster. Nothing here is synced by Argo CD.
+# Apply by hand, BEFORE the PET-74 move:
+#
+#   kubectl --kubeconfig <hydra-mgmt> apply -f etcd-backup-access.yaml
+# ############################################################################
+#
+# The identity hlcluster's etcd backups use to find the control-plane members
+# once the Machines live on hydra-mgmt (PET-70 phase B). The backup job asks
+# the API for one thing -- list Machines in `default` -- so that is all this
+# grants: no Secrets, no other namespace, no writes.
+#
+# Then copy its token and CA into the Secret the CronJobs mount on hlcluster,
+# without printing either:
+#
+#   kubectl --kubeconfig <hydra-mgmt> -n hydra-backup-access get secret etcd-backup-token -o json \
+#     | jq '{apiVersion:"v1",kind:"Secret",type:"Opaque",
+#            metadata:{name:"etcd-backup-mgmt-api",namespace:"hydra-backup"},
+#            data:{token:.data.token,"ca.crt":.data["ca.crt"]}}' \
+#     | kubectl --context <hlcluster> apply --server-side --field-manager=etcd-backup-access -f -
+#
+# Nothing reads that Secret until the CronJobs set KUBE_API and SA_DIR, which
+# is a change made at the move itself: before it, the Machines are on hlcluster
+# and pointing the jobs at hydra-mgmt would find none.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hydra-backup-access
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: etcd-backup
+  namespace: hydra-backup-access
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: etcd-backup-token
+  namespace: hydra-backup-access
+  annotations:
+    kubernetes.io/service-account.name: etcd-backup
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: etcd-backup-list-machines
+  namespace: default
+rules:
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machines"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: etcd-backup-list-machines
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: etcd-backup-list-machines
+subjects:
+  - kind: ServiceAccount
+    name: etcd-backup
+    namespace: hydra-backup-access

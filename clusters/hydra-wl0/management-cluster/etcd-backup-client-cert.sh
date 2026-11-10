@@ -27,6 +27,15 @@
 # The certificate is valid for 365 days. A daily check, CronJob
 # etcd-client-cert-check-<cluster>, starts failing 30 days before expiry, and
 # EtcdBackupClientCertExpiring says it is time to run this again.
+#
+# The CA and the backup can live on different clusters. Until the PET-74 pivot
+# both are on hlcluster; after it, Cluster API keeps <cluster>-etcd on
+# hydra-mgmt while the backups still run on hlcluster. Then point the CA read at
+# the management cluster and leave the current kubeconfig on hlcluster:
+#
+#   CA_KUBECONFIG=~/.kube/hydra-mgmt.yaml ./etcd-backup-client-cert.sh hydra-wl0
+#
+# Unset, both the read and the write use the current kubeconfig, as before.
 set -eu
 
 CLUSTER=${1:-hydra-wl0}
@@ -34,6 +43,12 @@ CLUSTER_NAMESPACE=${CLUSTER_NAMESPACE:-default}
 BACKUP_NAMESPACE=${BACKUP_NAMESPACE:-hydra-backup}
 DAYS=${DAYS:-365}
 SECRET=etcd-backup-$CLUSTER-client
+CA_KUBECONFIG=${CA_KUBECONFIG:-}
+
+# The CA's side: the management cluster, which is not always the current one.
+ca_kubectl() {
+	if [ -n "$CA_KUBECONFIG" ]; then kubectl --kubeconfig "$CA_KUBECONFIG" "$@"; else kubectl "$@"; fi
+}
 
 # tmpfs where there is one, so the CA key never reaches a disk; plain mktemp
 # otherwise.
@@ -49,8 +64,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 umask 077
 
-kubectl -n "$CLUSTER_NAMESPACE" get secret "$CLUSTER-etcd" -o jsonpath='{.data.tls\.crt}' | base64 -d >"$d/ca.crt"
-kubectl -n "$CLUSTER_NAMESPACE" get secret "$CLUSTER-etcd" -o jsonpath='{.data.tls\.key}' | base64 -d >"$d/ca.key"
+ca_kubectl -n "$CLUSTER_NAMESPACE" get secret "$CLUSTER-etcd" -o jsonpath='{.data.tls\.crt}' | base64 -d >"$d/ca.crt"
+ca_kubectl -n "$CLUSTER_NAMESPACE" get secret "$CLUSTER-etcd" -o jsonpath='{.data.tls\.key}' | base64 -d >"$d/ca.key"
 [ -s "$d/ca.crt" ] && [ -s "$d/ca.key" ] || { echo "Secret $CLUSTER_NAMESPACE/$CLUSTER-etcd has no CA" >&2; exit 1; }
 
 openssl ecparam -genkey -name prime256v1 -noout -out "$d/tls.key"

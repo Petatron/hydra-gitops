@@ -1,0 +1,539 @@
+# ############################################################################
+# APPLIED TO hydra-mgmt, THE MANAGEMENT CLUSTER CLUSTER API BUILT -- not to
+# hlcluster, not to hydra-wl0. Nothing here is synced by Argo CD. Apply by hand:
+#
+#   kubectl --kubeconfig <hydra-mgmt> apply -f hydra-observer.yaml
+# ############################################################################
+#
+# How hlcluster, the off-host observer (ADR-007 D4), keeps seeing the Cluster
+# API objects once they live on hydra-mgmt (PET-74). hydra-monitoring.yaml
+# collects them in-cluster on hlcluster; after the pivot that cluster holds
+# none, so the same collectors run here and ship to hlcluster's Prometheus --
+# the pattern hydra-wl0 already uses (decision D2a):
+#
+#   hydra-state-metrics  kube-state-metrics with THE SAME custom-resource config
+#                        as hydra-monitoring.yaml (Cluster, Machine, KCP,
+#                        HydraCluster, HydraMachine) plus nodes. Keep the two
+#                        ConfigMaps identical when either changes.
+#   hydra-agent          Prometheus in agent mode: scrapes hydra-state-metrics,
+#                        the Hydra provider and the three Cluster API
+#                        controllers, and remote-writes everything to
+#                        http://192.168.16.10:30090 with cluster="hydra-mgmt".
+#                        It stores nothing and evaluates no rules.
+#
+# The provider job is named exactly as hlcluster's ServiceMonitor names it,
+# so HydraProviderDown keeps a series when hlcluster's provider is scaled to 0.
+#
+# Safe before the move: until then hydra-mgmt holds no Cluster API objects, so
+# it ships its nodes and idle controllers only. Proven on a throwaway
+# management cluster in the PET-74 pivot rehearsal (2026-11-10): every target
+# up, every capi_* series arrived with its cluster label.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hydra-observer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hydra-state-metrics
+  namespace: hydra-observer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hydra-state-metrics
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - nodes
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - cluster.x-k8s.io
+  resources:
+  - clusters
+  - machines
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - controlplane.cluster.x-k8s.io
+  resources:
+  - kubeadmcontrolplanes
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - infrastructure.cluster.x-k8s.io
+  resources:
+  - hydraclusters
+  - hydramachines
+  verbs:
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hydra-state-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hydra-state-metrics
+subjects:
+- kind: ServiceAccount
+  name: hydra-state-metrics
+  namespace: hydra-observer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hydra-state-metrics-config
+  namespace: hydra-observer
+data:
+  custom-resource-state: "kind: CustomResourceStateMetrics\nspec:\n  resources:\n\
+    \  - errorLogV: 0\n    groupVersionKind:\n      group: cluster.x-k8s.io\n    \
+    \  kind: Cluster\n      version: v1beta2\n    labelsFromPath:\n      name:\n \
+    \     - metadata\n      - name\n      namespace:\n      - metadata\n      - namespace\n\
+    \      uid:\n      - metadata\n      - uid\n    metricNamePrefix: capi_cluster\n\
+    \    metrics:\n    - each:\n        info:\n          labelsFromPath:\n       \
+    \     paused_value: []\n          path:\n          - metadata\n          - annotations\n\
+    \          - cluster.x-k8s.io/paused\n        type: Info\n      help: Whether\
+    \ the cluster is paused and any of its resources will not be processed\n     \
+    \   by the controllers.\n      name: annotation_paused\n    - each:\n        gauge:\n\
+    \          nilIsZero: false\n          path:\n          - metadata\n         \
+    \ - creationTimestamp\n          valueFrom: \n        type: Gauge\n      help:\
+    \ Unix creation timestamp.\n      name: created\n    - each:\n        info:\n\
+    \          labelsFromPath:\n            control_plane_endpoint_host:\n       \
+    \     - spec\n            - controlPlaneEndpoint\n            - host\n       \
+    \     control_plane_endpoint_port:\n            - spec\n            - controlPlaneEndpoint\n\
+    \            - port\n            control_plane_reference_kind:\n            -\
+    \ spec\n            - controlPlaneRef\n            - kind\n            control_plane_reference_name:\n\
+    \            - spec\n            - controlPlaneRef\n            - name\n     \
+    \       infrastructure_reference_kind:\n            - spec\n            - infrastructureRef\n\
+    \            - kind\n            infrastructure_reference_name:\n            -\
+    \ spec\n            - infrastructureRef\n            - name\n            topology_classref_name:\n\
+    \            - spec\n            - topology\n            - classRef\n        \
+    \    - name\n            topology_classref_namespace:\n            - spec\n  \
+    \          - topology\n            - classRef\n            - namespace\n     \
+    \       topology_version:\n            - spec\n            - topology\n      \
+    \      - version\n          path: \n        type: Info\n      help: Information\
+    \ about a cluster.\n      name: info\n    - each:\n        gauge:\n          nilIsZero:\
+    \ true\n          path:\n          - spec\n          - paused\n          valueFrom:\
+    \ \n        type: Gauge\n      help: Whether the cluster is paused and any of\
+    \ its resources will not be processed\n        by the controllers.\n      name:\
+    \ spec_paused\n    - each:\n        stateSet:\n          labelName: status\n \
+    \         labelsFromPath:\n            type:\n            - type\n          list:\n\
+    \          - 'True'\n          - 'False'\n          - Unknown\n          path:\n\
+    \          - status\n          - conditions\n          valueFrom:\n          -\
+    \ status\n        type: StateSet\n      help: The condition of a cluster.\n  \
+    \    name: status_condition\n    - each:\n        gauge:\n          labelsFromPath:\n\
+    \            status:\n            - status\n            type:\n            - type\n\
+    \          nilIsZero: false\n          path:\n          - status\n          -\
+    \ conditions\n          valueFrom:\n          - lastTransitionTime\n        type:\
+    \ Gauge\n      help: The condition's last transition time of a cluster.\n    \
+    \  name: status_condition_last_transition_time\n    - each:\n        stateSet:\n\
+    \          labelName: phase\n          list:\n          - Pending\n          -\
+    \ Provisioning\n          - Provisioned\n          - Deleting\n          - Failed\n\
+    \          - Unknown\n          path:\n          - status\n          - phase\n\
+    \          valueFrom: \n        type: StateSet\n      help: The clusters current\
+    \ phase.\n      name: status_phase\n    resourcePlural: ''\n  - errorLogV: 0\n\
+    \    groupVersionKind:\n      group: cluster.x-k8s.io\n      kind: Machine\n \
+    \     version: v1beta2\n    labelsFromPath:\n      cluster_name:\n      - spec\n\
+    \      - clusterName\n      name:\n      - metadata\n      - name\n      namespace:\n\
+    \      - metadata\n      - namespace\n      uid:\n      - metadata\n      - uid\n\
+    \    metricNamePrefix: capi_machine\n    metrics:\n    - each:\n        info:\n\
+    \          labelsFromPath:\n            address:\n            - address\n    \
+    \        type:\n            - type\n          path:\n          - status\n    \
+    \      - addresses\n        type: Info\n      help: Address information about\
+    \ a machine.\n      name: addresses\n    - each:\n        info:\n          labelsFromPath:\n\
+    \            paused_value: []\n          path:\n          - metadata\n       \
+    \   - annotations\n          - cluster.x-k8s.io/paused\n        type: Info\n \
+    \     help: Whether the machine is paused and any of its resources will not be\
+    \ processed\n        by the controllers.\n      name: annotation_paused\n    -\
+    \ each:\n        gauge:\n          nilIsZero: false\n          path:\n       \
+    \   - metadata\n          - creationTimestamp\n          valueFrom: \n       \
+    \ type: Gauge\n      help: Unix creation timestamp.\n      name: created\n   \
+    \ - each:\n        info:\n          labelsFromPath:\n            bootstrap_reference_kind:\n\
+    \            - spec\n            - bootstrap\n            - configRef\n      \
+    \      - kind\n            bootstrap_reference_name:\n            - spec\n   \
+    \         - bootstrap\n            - configRef\n            - name\n         \
+    \   container_runtime_version:\n            - status\n            - nodeInfo\n\
+    \            - containerRuntimeVersion\n            control_plane_name:\n    \
+    \        - metadata\n            - labels\n            - cluster.x-k8s.io/control-plane-name\n\
+    \            failure_domain:\n            - spec\n            - failureDomain\n\
+    \            infrastructure_reference_kind:\n            - spec\n            -\
+    \ infrastructureRef\n            - kind\n            infrastructure_reference_name:\n\
+    \            - spec\n            - infrastructureRef\n            - name\n   \
+    \         kernel_version:\n            - status\n            - nodeInfo\n    \
+    \        - kernelVersion\n            kube_proxy_version:\n            - status\n\
+    \            - nodeInfo\n            - kubeProxyVersion\n            kubelet_version:\n\
+    \            - status\n            - nodeInfo\n            - kubeletVersion\n\
+    \            os_image:\n            - status\n            - nodeInfo\n       \
+    \     - osImage\n            provider_id:\n            - spec\n            - providerID\n\
+    \            version:\n            - spec\n            - version\n          path:\
+    \ \n        type: Info\n      help: Information about a machine.\n      name:\
+    \ info\n    - each:\n        gauge:\n          nilIsZero: true\n          path:\n\
+    \          - status\n          - certificatesExpiryDate\n          valueFrom:\
+    \ \n        type: Gauge\n      help: Information about certificate expiration\
+    \ date of a control plane node.\n      name: status_certificatesexpirydate\n \
+    \   - each:\n        stateSet:\n          labelName: status\n          labelsFromPath:\n\
+    \            type:\n            - type\n          list:\n          - 'True'\n\
+    \          - 'False'\n          - Unknown\n          path:\n          - status\n\
+    \          - conditions\n          valueFrom:\n          - status\n        type:\
+    \ StateSet\n      help: The condition of a machine.\n      name: status_condition\n\
+    \    - each:\n        gauge:\n          labelsFromPath:\n            status:\n\
+    \            - status\n            type:\n            - type\n          nilIsZero:\
+    \ false\n          path:\n          - status\n          - conditions\n       \
+    \   valueFrom:\n          - lastTransitionTime\n        type: Gauge\n      help:\
+    \ The condition's last transition time of a machine.\n      name: status_condition_last_transition_time\n\
+    \    - each:\n        info:\n          labelsFromPath:\n            node_name:\n\
+    \            - name\n          path:\n          - status\n          - nodeRef\n\
+    \        type: Info\n      help: Information about the node reference of a machine.\n\
+    \      name: status_noderef\n    - each:\n        stateSet:\n          labelName:\
+    \ phase\n          list:\n          - Pending\n          - Provisioning\n    \
+    \      - Provisioned\n          - Running\n          - Updating\n          - Deleting\n\
+    \          - Deleted\n          - Failed\n          - Unknown\n          path:\n\
+    \          - status\n          - phase\n          valueFrom: \n        type: StateSet\n\
+    \      help: The machines current phase.\n      name: status_phase\n    resourcePlural:\
+    \ ''\n  - errorLogV: 0\n    groupVersionKind:\n      group: controlplane.cluster.x-k8s.io\n\
+    \      kind: KubeadmControlPlane\n      version: v1beta2\n    labelsFromPath:\n\
+    \      cluster_name:\n      - metadata\n      - ownerReferences\n      - \"[kind=Cluster]\"\
+    \n      - name\n      name:\n      - metadata\n      - name\n      namespace:\n\
+    \      - metadata\n      - namespace\n      uid:\n      - metadata\n      - uid\n\
+    \    metricNamePrefix: capi_kubeadmcontrolplane\n    metrics:\n    - each:\n \
+    \       info:\n          labelsFromPath:\n            paused_value: []\n     \
+    \     path:\n          - metadata\n          - annotations\n          - cluster.x-k8s.io/paused\n\
+    \        type: Info\n      help: Whether the kubeadmcontrolplane is paused and\
+    \ any of its resources will\n        not be processed by the controllers.\n  \
+    \    name: annotation_paused\n    - each:\n        gauge:\n          nilIsZero:\
+    \ false\n          path:\n          - metadata\n          - creationTimestamp\n\
+    \          valueFrom: \n        type: Gauge\n      help: Unix creation timestamp.\n\
+    \      name: created\n    - each:\n        info:\n          labelsFromPath:\n\
+    \            version:\n            - spec\n            - version\n          path:\
+    \ \n        type: Info\n      help: Information about a kubeadmcontrolplane.\n\
+    \      name: info\n    - each:\n        gauge:\n          nilIsZero: false\n \
+    \         path:\n          - spec\n          - replicas\n          valueFrom:\
+    \ \n        type: Gauge\n      help: The number of desired machines for a kubeadmcontrolplane.\n\
+    \      name: spec_replicas\n    - each:\n        gauge:\n          nilIsZero:\
+    \ false\n          path:\n          - spec\n          - rollout\n          - strategy\n\
+    \          - rollingUpdate\n          - maxSurge\n          valueFrom: \n    \
+    \    type: Gauge\n      help: Maximum number of replicas that can be scheduled\
+    \ above the desired number\n        of replicas during a rolling update of a kubeadmcontrolplane.\n\
+    \      name: spec_strategy_rollingupdate_max_surge\n    - each:\n        stateSet:\n\
+    \          labelName: status\n          labelsFromPath:\n            type:\n \
+    \           - type\n          list:\n          - 'True'\n          - 'False'\n\
+    \          - Unknown\n          path:\n          - status\n          - conditions\n\
+    \          valueFrom:\n          - status\n        type: StateSet\n      help:\
+    \ The condition of a kubeadmcontrolplane.\n      name: status_condition\n    -\
+    \ each:\n        gauge:\n          labelsFromPath:\n            status:\n    \
+    \        - status\n            type:\n            - type\n          nilIsZero:\
+    \ false\n          path:\n          - status\n          - conditions\n       \
+    \   valueFrom:\n          - lastTransitionTime\n        type: Gauge\n      help:\
+    \ The condition's last transition time of a kubeadmcontrolplane.\n      name:\
+    \ status_condition_last_transition_time\n    - each:\n        gauge:\n       \
+    \   nilIsZero: true\n          path:\n          - status\n          - replicas\n\
+    \          valueFrom: \n        type: Gauge\n      help: The number of replicas\
+    \ per kubeadmcontrolplane.\n      name: status_replicas\n    - each:\n       \
+    \ gauge:\n          nilIsZero: true\n          path:\n          - status\n   \
+    \       - availableReplicas\n          valueFrom: \n        type: Gauge\n    \
+    \  help: The number of available replicas per kubeadmcontrolplane.\n      name:\
+    \ status_replicas_available\n    - each:\n        gauge:\n          nilIsZero:\
+    \ true\n          path:\n          - status\n          - readyReplicas\n     \
+    \     valueFrom: \n        type: Gauge\n      help: The number of ready replicas\
+    \ per kubeadmcontrolplane.\n      name: status_replicas_ready\n    - each:\n \
+    \       gauge:\n          nilIsZero: true\n          path:\n          - status\n\
+    \          - upToDateReplicas\n          valueFrom: \n        type: Gauge\n  \
+    \    help: The number of up-to-date replicas per kubeadmcontrolplane.\n      name:\
+    \ status_replicas_uptodate\n    resourcePlural: ''\n  - groupVersionKind:\n  \
+    \    group: infrastructure.cluster.x-k8s.io\n      kind: HydraCluster\n      version:\
+    \ v1alpha1\n    labelsFromPath:\n      cluster_name:\n      - metadata\n     \
+    \ - labels\n      - cluster.x-k8s.io/cluster-name\n      name:\n      - metadata\n\
+    \      - name\n      namespace:\n      - metadata\n      - namespace\n      uid:\n\
+    \      - metadata\n      - uid\n    metricNamePrefix: capi_hydracluster\n    metrics:\n\
+    \    - name: status_condition\n      help: The condition of a hydracluster.\n\
+    \      each:\n        stateSet:\n          labelName: status\n          labelsFromPath:\n\
+    \            type:\n            - type\n          list:\n          - 'True'\n\
+    \          - 'False'\n          - Unknown\n          path:\n          - status\n\
+    \          - conditions\n          valueFrom:\n          - status\n        type:\
+    \ StateSet\n    - name: status_condition_last_transition_time\n      help: The\
+    \ condition last transition time of a hydracluster.\n      each:\n        gauge:\n\
+    \          labelsFromPath:\n            status:\n            - status\n      \
+    \      type:\n            - type\n          path:\n          - status\n      \
+    \    - conditions\n          valueFrom:\n          - lastTransitionTime\n    \
+    \    type: Gauge\n  - groupVersionKind:\n      group: infrastructure.cluster.x-k8s.io\n\
+    \      kind: HydraMachine\n      version: v1alpha1\n    labelsFromPath:\n    \
+    \  cluster_name:\n      - metadata\n      - labels\n      - cluster.x-k8s.io/cluster-name\n\
+    \      name:\n      - metadata\n      - name\n      namespace:\n      - metadata\n\
+    \      - namespace\n      uid:\n      - metadata\n      - uid\n    metricNamePrefix:\
+    \ capi_hydramachine\n    metrics:\n    - name: created\n      help: Unix creation\
+    \ timestamp.\n      each:\n        gauge:\n          path:\n          - metadata\n\
+    \          - creationTimestamp\n        type: Gauge\n    - name: info\n      help:\
+    \ Information about a hydramachine.\n      each:\n        info:\n          labelsFromPath:\n\
+    \            control_plane_name:\n            - metadata\n            - labels\n\
+    \            - cluster.x-k8s.io/control-plane-name\n            failure_domain:\n\
+    \            - status\n            - failureDomain\n            provider_id:\n\
+    \            - spec\n            - providerID\n        type: Info\n    - name:\
+    \ status_condition\n      help: The condition of a hydramachine.\n      each:\n\
+    \        stateSet:\n          labelName: status\n          labelsFromPath:\n \
+    \           type:\n            - type\n          list:\n          - 'True'\n \
+    \         - 'False'\n          - Unknown\n          path:\n          - status\n\
+    \          - conditions\n          valueFrom:\n          - status\n        type:\
+    \ StateSet\n    - name: status_condition_last_transition_time\n      help: The\
+    \ condition last transition time of a hydramachine.\n      each:\n        gauge:\n\
+    \          labelsFromPath:\n            status:\n            - status\n      \
+    \      type:\n            - type\n          path:\n          - status\n      \
+    \    - conditions\n          valueFrom:\n          - lastTransitionTime\n    \
+    \    type: Gauge\n"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hydra-state-metrics
+  namespace: hydra-observer
+  labels:
+    app.kubernetes.io/name: hydra-state-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hydra-state-metrics
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hydra-state-metrics
+    spec:
+      serviceAccountName: hydra-state-metrics
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: kube-state-metrics
+        image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0
+        args:
+        - --resources=nodes
+        - --custom-resource-state-config-file=/etc/hydra-state-metrics/custom-resource-state
+        - --port=8080
+        - --telemetry-port=8081
+        ports:
+        - name: http-metrics
+          containerPort: 8080
+        - name: telemetry
+          containerPort: 8081
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: 8080
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+        volumeMounts:
+        - name: config
+          mountPath: /etc/hydra-state-metrics
+          readOnly: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 10m
+            memory: 48Mi
+          limits:
+            memory: 192Mi
+      volumes:
+      - name: config
+        configMap:
+          name: hydra-state-metrics-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hydra-state-metrics
+  namespace: hydra-observer
+  labels:
+    app.kubernetes.io/name: hydra-state-metrics
+spec:
+  selector:
+    app.kubernetes.io/name: hydra-state-metrics
+  ports:
+  - name: http-metrics
+    port: 8080
+    targetPort: http-metrics
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hydra-agent
+  namespace: hydra-observer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hydra-agent
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - services
+  - endpoints
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hydra-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hydra-agent
+subjects:
+- kind: ServiceAccount
+  name: hydra-agent
+  namespace: hydra-observer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hydra-agent-config
+  namespace: hydra-observer
+data:
+  agent.yml: |
+    global:
+      scrape_interval: 30s
+      scrape_timeout: 10s
+      external_labels:
+        cluster: hydra-mgmt
+    remote_write:
+      - url: http://192.168.16.10:30090/api/v1/write
+        remote_timeout: 30s
+    scrape_configs:
+      - job_name: hydra-state-metrics
+        honor_labels: true
+        static_configs:
+          - targets: ["hydra-state-metrics.hydra-observer.svc:8080"]
+      - job_name: cluster-api-provider-hydra-controller-manager-metrics-service
+        scheme: https
+        tls_config: { insecure_skip_verify: true }
+        authorization: { credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token }
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces: { names: [cluster-api-provider-hydra-system] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name, __meta_kubernetes_endpoint_port_name]
+            action: keep
+            regex: cluster-api-provider-hydra;https
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+      - job_name: capi-controllers
+        scheme: https
+        tls_config: { insecure_skip_verify: true }
+        authorization: { credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token }
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: { names: [capi-system, capi-kubeadm-control-plane-system, capi-kubeadm-bootstrap-system] }
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_control_plane, __meta_kubernetes_pod_container_port_name]
+            action: keep
+            regex: controller-manager;metrics
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_container_name]
+            target_label: container
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hydra-agent
+  namespace: hydra-observer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hydra-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hydra-agent
+    spec:
+      serviceAccountName: hydra-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: prometheus
+        image: quay.io/prometheus/prometheus:v3.14.0
+        args:
+        - --config.file=/etc/hydra-agent/agent.yml
+        - --agent
+        - --storage.agent.path=/data
+        - --storage.agent.retention.max-time=2h
+        - --web.listen-address=:9090
+        ports:
+        - name: web
+          containerPort: 9090
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 20m
+            memory: 64Mi
+          limits:
+            memory: 384Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/hydra-agent
+          readOnly: true
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: config
+        configMap:
+          name: hydra-agent-config
+      - name: data
+        emptyDir: {}
