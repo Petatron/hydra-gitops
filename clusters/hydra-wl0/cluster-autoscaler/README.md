@@ -28,9 +28,10 @@ admin" might suggest:
   apply to `list`/`watch`. This token can read every Cluster API object on the
   management cluster, including other clusters'.
 - **Writes are pinned** to `machinedeployments/scale` on `hydra-wl0-md-0` and
-  `pool-compute` via `resourceNames`. It cannot scale `hydra-md-0` — which matters, because that
-  pool is in the same `default` namespace and belongs to the management cluster
-  itself.
+  `pool-compute` via `resourceNames`. It cannot scale any other
+  MachineDeployment — which matters, because `default` is shared: other
+  clusters' objects live there too (today the `hydra-mgmt` control plane), and
+  so would any pool one of them adds.
 - **The discovery flag is not a boundary.**
   `--node-group-auto-discovery=...,clusterName=hydra-wl0` only filters what the
   CA process chooses to act on. Anyone holding the token can ignore it; the
@@ -43,8 +44,8 @@ token holder can request. The credential can also `update` Machines in
 `default` (PET-13 scale-down), but a ValidatingAdmissionPolicy limits that to
 adding or removing the `cluster.x-k8s.io/delete-machine` annotation on
 `hydra-wl0`'s non-control-plane Machines — and refuses adding it to a
-`hydra-wl0-md-0` Machine (PET-54). It cannot scale `hydra-md-0`, and it
-cannot touch the management cluster's own Machines.
+`hydra-wl0-md-0` Machine (PET-54). It cannot scale another cluster's pool,
+and it cannot touch another cluster's Machines.
 
 That md-0 refusal constrains CA's own scale-down path, which marks a Machine
 before it lowers replicas. It does not stop a token holder lowering md-0's
@@ -102,8 +103,8 @@ Confirm it works, and that it is as constrained as claimed, before installing it
 kubectl --kubeconfig=/tmp/capi-kubeconfig -n default get machinedeployments
 kubectl --kubeconfig=/tmp/capi-kubeconfig auth can-i patch machinedeployments/hydra-wl0-md-0 \
   --subresource=scale -n default                  # expect: yes
-kubectl --kubeconfig=/tmp/capi-kubeconfig auth can-i patch machinedeployments/hydra-md-0 \
-  --subresource=scale -n default                  # expect: no
+kubectl --kubeconfig=/tmp/capi-kubeconfig auth can-i patch machinedeployments/not-hydra-wl0 \
+  --subresource=scale -n default                  # expect: no (any name not pinned)
 ```
 
 ### 3. Install it here

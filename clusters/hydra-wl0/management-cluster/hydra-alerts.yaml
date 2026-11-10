@@ -413,10 +413,12 @@ spec:
               stale. Check the Deployments in capi-system and capi-kubeadm-*-system.
     - name: hydra-lab-management-nodes
       rules:
-        # The management cluster's own nodes. Its worker VMs belong to the
-        # adopted Cluster "hydra", whose control plane Cluster API does not
-        # manage, so it never inspects their nodes and the provider's node
-        # alerts leave them out (PET-61). These cover them instead.
+        # The management cluster's own nodes. It is not a Cluster API cluster
+        # of its own, so Cluster API never inspects its nodes and the
+        # provider's node alerts leave them out (PET-61). These cover them
+        # instead. Its worker VMs were the adopted Cluster "hydra"'s, retired
+        # 2026-11-09 (PET-74); with only the control plane left, the worker
+        # alert has nothing to fire on until a worker is added.
         - alert: HydraManagementControlPlaneNotReady
           expr: |
             (kube_node_status_condition{job="hydra-state-metrics", condition="Ready", status="true"} == 0)

@@ -68,10 +68,11 @@ spec:
             # side -- this cluster -- and this kubeconfig for the side holding
             # the MachineDeployments. The Secret is NOT in Git: see README.md.
             - --cloud-config=/etc/capi/kubeconfig
-            # Selects this cluster's own MachineDeployments. Without
-            # clusterName, CA would also pick up hydra-md-0, which belongs to
-            # the management cluster's own pool and has nothing to do with this
-            # cluster's scheduling pressure.
+            # Selects this cluster's own MachineDeployments. The namespace is
+            # shared with other clusters' Cluster API objects, so without
+            # clusterName CA would also pick up any pool another cluster there
+            # has, which has nothing to do with this cluster's scheduling
+            # pressure.
             #
             # This is a SELECTION filter, not an authorization boundary: it
             # governs what this process chooses to act on, and anyone holding
