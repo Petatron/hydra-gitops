@@ -384,23 +384,32 @@ spec:
       rules:
         - alert: HydraStateMetricsDown
           # Every Cluster API and Hydra object alert reads this exporter. If it
-          # stops, those alerts go silent rather than firing.
-          expr: absent(up{job="hydra-state-metrics"} == 1)
+          # stops, those alerts go silent rather than firing. Two copies run
+          # since the PET-74 move: hlcluster's own (no cluster label; its nodes)
+          # and hydra-mgmt's (cluster="hydra-mgmt"; every Cluster API object),
+          # shipped by hydra-observer.yaml. Either one missing is blindness.
+          expr: |
+            absent(up{job="hydra-state-metrics", cluster=""} == 1)
+            or absent(up{job="hydra-state-metrics", cluster="hydra-mgmt"} == 1)
           for: 5m
           labels:
             severity: critical
           annotations:
             summary: hydra-state-metrics is down; Hydra cluster and machine alerts are blind
             description: >-
-              Prometheus has not scraped hydra-monitoring/hydra-state-metrics for 5 minutes.
+              Prometheus has had no successful scrape of hydra-state-metrics (hlcluster's, or
+              hydra-mgmt's via its agent) for 5 minutes.
               No alert about Hydra clusters, machines, nodes or etcd can fire until it is
               back.
         - alert: HydraClusterAPIControllersDown
+          # The controllers that manage the clusters: hydra-mgmt's since the
+          # PET-74 move, scraped there by hydra-observer.yaml's agent.
+          # hlcluster's copies are scaled to 0 and not watched.
           expr: |
-            up{cluster="", container="manager", namespace=~"capi-system|capi-kubeadm-control-plane-system|capi-kubeadm-bootstrap-system"} == 0
-            or absent(up{cluster="", container="manager", namespace="capi-system"})
-            or absent(up{cluster="", container="manager", namespace="capi-kubeadm-control-plane-system"})
-            or absent(up{cluster="", container="manager", namespace="capi-kubeadm-bootstrap-system"})
+            up{cluster="hydra-mgmt", container="manager", namespace=~"capi-system|capi-kubeadm-control-plane-system|capi-kubeadm-bootstrap-system"} == 0
+            or absent(up{cluster="hydra-mgmt", container="manager", namespace="capi-system"})
+            or absent(up{cluster="hydra-mgmt", container="manager", namespace="capi-kubeadm-control-plane-system"})
+            or absent(up{cluster="hydra-mgmt", container="manager", namespace="capi-kubeadm-bootstrap-system"})
           for: 5m
           labels:
             severity: critical

@@ -132,6 +132,14 @@ spec:
                   value: "5s"
                 - name: SNAPSHOT_TIMEOUT
                   value: "240s"
+                # The Machines live on hydra-mgmt since the PET-74 move, not in
+                # this cluster: list them there, as etcd-backup-access.yaml's
+                # list-only identity. Its token and CA are Secret
+                # etcd-backup-mgmt-api, mounted below.
+                - name: KUBE_API
+                  value: https://192.168.15.11:6443
+                - name: SA_DIR
+                  value: /etc/etcd-backup/api
               # Root, because kubelet creates the hostPath directory root-owned;
               # with every capability dropped it can write there and nothing else.
               securityContext:
@@ -162,6 +170,9 @@ spec:
                 - name: age
                   mountPath: /etc/etcd-backup/age
                   readOnly: true
+                - name: api
+                  mountPath: /etc/etcd-backup/api
+                  readOnly: true
           volumes:
             - name: backup
               persistentVolumeClaim:
@@ -181,6 +192,10 @@ spec:
             - name: age
               configMap:
                 name: etcd-backup-age-recipients
+            - name: api
+              secret:
+                secretName: etcd-backup-mgmt-api
+                defaultMode: 0400
 ---
 # Daily: fails when the client certificate above expires within 30 days, so
 # EtcdBackupClientCertExpiring fires with a month to spare. A separate job, not
