@@ -73,6 +73,17 @@ spec:
           replicas: 2
         # Certificates issued in the cluster by certgen, never by Helm: a
         # Helm-generated key changes on every render.
+        #
+        # certgen signs with the existing Secret kube-system/cilium-ca, which
+        # Helm made at install and this chart no longer renders. Deleting it
+        # would make certgen mint a new CA. It is guarded on the live object,
+        # since Argo CD cannot annotate a resource it does not render; after a
+        # rebuild that recreates it, apply the guard again (hydra-wl0 context):
+        #   kubectl -n kube-system annotate secret cilium-ca \
+        #     argocd.argoproj.io/sync-options=Prune=false \
+        #     argocd.argoproj.io/compare-options=IgnoreExtraneous
+        # Prune=false keeps even a "sync with prune" from deleting it;
+        # IgnoreExtraneous stops it holding the Application OutOfSync.
         hubble:
           tls:
             auto:
