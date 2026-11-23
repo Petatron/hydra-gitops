@@ -28,7 +28,7 @@ admin" might suggest:
   apply to `list`/`watch`. This token can read every Cluster API object on the
   management cluster, including other clusters'.
 - **Writes are pinned** to `machinedeployments/scale` on `hydra-wl0-md-0` and
-  `pool-compute` via `resourceNames`. It cannot scale any other
+  `hydra-wl0-compute` via `resourceNames`. It cannot scale any other
   MachineDeployment — which matters, because `default` is shared: other
   clusters' objects live there too (today the `hydra-mgmt` control plane), and
   so would any pool one of them adds.
@@ -37,7 +37,7 @@ admin" might suggest:
   CA process chooses to act on. Anyone holding the token can ignore it; the
   `resourceNames` rule is the part that constrains a holder.
 
-A holder can scale `hydra-wl0-md-0` or `pool-compute` to zero, causing Cluster
+A holder can scale `hydra-wl0-md-0` or `hydra-wl0-compute` to zero, causing Cluster
 API to delete that pool's worker VMs. The autoscaler's own policy — `min-size`,
 and the md-0 scale-down exemption — governs what *CA* chooses to do, not what a
 token holder can request. The credential can also `update` Machines in
@@ -270,7 +270,8 @@ reading the output:
   process cannot open `/etc/capi/kubeconfig` and the pod crash-loops before it
   discovers anything.
 - **Scale-down is on (PET-13), and exempt for `hydra-wl0-md-0`.** Only pools
-  without the exemption can shrink; today that is `pool-compute`. Removing the
+  without the exemption can shrink; today that is `hydra-wl0-compute`
+  (`pool-compute` until PET-96 renamed it). Removing the
   exemption makes md-0's workers — one of which runs all of Argo CD, with no
   PodDisruptionBudget — candidates the moment they look idle. Since PET-54 a
   candidate md-0 node can be drained but not deleted (the admission policy
