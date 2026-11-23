@@ -117,6 +117,30 @@ class ValidationTests(unittest.TestCase):
                            "kind": kind, "metadata": {"name": "test"}, "spec": spec})
                 self.run_validation("Kubernetes schema validation failed")
 
+    def hydra_config(self, **network):
+        return {"apiVersion": "hydra.io/v1alpha1", "kind": "ClusterConfig",
+                "metadata": {"name": "c"}, "spec": {"kubernetesVersion": "v1.35.3",
+                "storagePool": "p", "image": {"name": "i.img"},
+                "network": {"controlPlaneEndpoint": "192.0.2.10", "bridges": ["br0"], **network},
+                "controlPlane": {"replicas": 1, "vcpus": 2, "memory": "4Gi", "diskSize": "20Gi"}}}
+
+    def test_hydra_cluster_config_renders(self):
+        self.write("clusters/c/hydra.yaml", self.hydra_config(cni="external"))
+        self.run_validation()
+
+    def test_invalid_hydra_cluster_config(self):
+        # cni: external with an MTU is refused by hydra's own validation.
+        self.write("clusters/c/hydra.yaml", self.hydra_config(cni="external", mtu=1500))
+        self.run_validation("hydra cluster render failed")
+
+    def test_unknown_hydra_config_field(self):
+        self.write("clusters/c/hydra.yaml", self.hydra_config(notAField=True))
+        self.run_validation("hydra cluster render failed")
+
+    def test_hydra_cluster_config_must_be_alone(self):
+        self.write("clusters/c/hydra.yaml", yaml.safe_dump(self.hydra_config()) + "---\n" + yaml.safe_dump(pod()))
+        self.run_validation("must be the only document")
+
     def test_invalid_yaml(self):
         self.write("broken.yaml", "spec: [unterminated")
         self.run_validation("YAML parse failed")

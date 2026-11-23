@@ -1,0 +1,55 @@
+# hydra-wl0 as the `hydra` CLI describes it (PET-96). NOT reconciled by Argo CD:
+# the hydra-wl0 root Application watches clusters/hydra-wl0/apps only. The CLI
+# applies this to the management cluster (hydra-mgmt), for example
+#   hydra cluster plan -f clusters/hydra-wl0/hydra.yaml --management-kubeconfig <hydra-mgmt kubeconfig>
+# Values are this site's (the reference lab), not defaults.
+#
+# Outside this file, deliberately:
+# - hycluster-worker-0, the hypervisor host joined to this cluster as a worker
+#   by hand. It has no Cluster API Machine, runs Argo CD and holds radar's
+#   local-path volumes, and hydra does not manage it.
+# - Cilium: installed by Argo CD (apps/cilium.yaml) with Hydra's canonical
+#   values, so the CNI is external here.
+# - md-0's Cluster Autoscaler exemption
+#   (cluster.x-k8s.io/autoscaling-options-scaledownutilizationthreshold: "0"),
+#   which hydra.yaml cannot express yet. Server-side apply leaves it in place;
+#   a pool recreated by hydra would not carry it.
+apiVersion: hydra.io/v1alpha1
+kind: ClusterConfig
+metadata:
+  name: hydra-wl0
+spec:
+  kubernetesVersion: v1.35.3
+  hypervisor:
+    address: 192.168.15.13:16514
+  storagePool: k8s-workers
+  image:
+    name: ubuntu-24.04-server-cloudimg-amd64.img
+  network:
+    controlPlaneEndpoint: 192.168.15.10
+    bridges: [br0]
+    podCIDR: 10.244.0.0/16
+    cni: external
+  controlPlane:
+    replicas: 3
+    vcpus: 4
+    memory: 8Gi
+    diskSize: 40Gi
+  nodePools:
+    - name: md-0
+      vcpus: 2
+      memory: 4Gi
+      diskSize: 40Gi
+      autoscaling:
+        min: 1
+        max: 3
+    - name: compute
+      vcpus: 4
+      memory: 8Gi
+      diskSize: 80Gi
+      labels:
+        hydra.petatron.io/pool: compute
+        hydra.petatron.io/class: 4c8g
+      autoscaling:
+        min: 0
+        max: 6
