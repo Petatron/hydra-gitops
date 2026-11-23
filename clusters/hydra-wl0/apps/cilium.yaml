@@ -15,6 +15,18 @@
 # service routing. Both are what the top-level apps/cilium.yaml would have done.
 #
 # The version is pinned to what is installed, so adoption is not also an upgrade.
+#
+# Since PET-94 these values follow Hydra's canonical Cilium values
+# (Petatron/hydra hack/cilium-values.yaml). That file is a template: the shared
+# settings are copied as they are, and its four sentinels are filled in from
+# hydra-wl0's hydra.yaml -- cluster.name, the pod CIDR, MTU, and
+# operator.replicas (2: the cluster always has at least two nodes). Keep the
+# two in step; a later hand-over to Hydra's addon controller (PET-95) should
+# then change nothing.
+#
+# Changing cluster.name or MTU here only rewrites cilium-config: the chart does
+# not roll the agents on a config change, so they take effect when the cilium
+# DaemonSet is restarted, deliberately and in a window (see the PET-94 PR).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -39,13 +51,32 @@ spec:
     targetRevision: "1.19.1"
     helm:
       valuesObject:
+        # Per cluster (hydra-wl0's hydra.yaml): metadata.name.
+        cluster:
+          name: hydra-wl0
+          id: 0
         kubeProxyReplacement: false
         routingMode: tunnel
+        tunnelProtocol: vxlan
         ipam:
           mode: cluster-pool
           operator:
+            # Per cluster: spec.network.podCIDR.
             clusterPoolIPv4PodCIDRList:
               - 10.244.0.0/16
+        # Per cluster: spec.network.mtu. Pinned because auto-detection chose
+        # tailscale0's 1280 on hycluster-worker-0 while its pod traffic leaves
+        # through br0 at 1500, and every other node runs 1500 (PET-32, PET-94).
+        MTU: 1500
+        operator:
+          # Per cluster: 2 when the cluster always has at least two nodes.
+          replicas: 2
+        # Certificates issued in the cluster by certgen, never by Helm: a
+        # Helm-generated key changes on every render.
+        hubble:
+          tls:
+            auto:
+              method: cronJob
   destination:
     server: https://kubernetes.default.svc
     namespace: kube-system
