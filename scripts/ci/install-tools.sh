@@ -29,3 +29,16 @@ download 'https://github.com/kubernetes-sigs/kustomize/releases/download/kustomi
   "kustomize_v5.8.1_${os}_${arch}.tar.gz" kustomize
 download 'https://github.com/rhysd/actionlint/releases/download/v1.7.12' \
   "actionlint_1.7.12_${os}_${arch}.tar.gz" actionlint
+# hydra ships bare binaries, not archives. It checks each cluster's hydra.yaml
+# (validate.py renders it); v0.4.0 is the first release that knows
+# spec.network.cni. The hydra-* lines in tool-checksums.txt are v0.4.0's.
+download_binary() {
+  local base="$1" asset="$2" binary="$3"
+  curl --fail --silent --show-error --location --retry 3 "$base/$asset" -o "$asset"
+  awk -v file="$asset" '$2 == file {print}' "$checksums" > selected-checksum
+  test -s selected-checksum
+  shasum -a 256 -c selected-checksum
+  install -m 0755 "$asset" "$dest/$binary"
+}
+download_binary 'https://github.com/Petatron/hydra/releases/download/v0.4.0' \
+  "hydra-$os-$arch" hydra
