@@ -1,0 +1,27 @@
+# hydra-mgmt, the self-hosted management cluster, as the `hydra` CLI describes
+# it (PET-96). Nothing in this repository reconciles it: hydra-mgmt has no
+# Argo CD. The CLI applies it to hydra-mgmt itself, for example
+#   hydra cluster plan -f clusters/hydra-mgmt/hydra.yaml --management-kubeconfig <hydra-mgmt kubeconfig>
+# Values are this site's (the reference lab), not defaults.
+#
+# Cilium is the Helm release from `cilium install`, upgraded to Hydra's
+# canonical values (PET-94), so the CNI is external here.
+apiVersion: hydra.io/v1alpha1
+kind: ClusterConfig
+metadata:
+  name: hydra-mgmt
+spec:
+  kubernetesVersion: v1.35.3
+  storagePool: k8s-workers
+  image:
+    name: ubuntu-24.04-server-cloudimg-amd64.img
+  network:
+    controlPlaneEndpoint: 192.168.15.11
+    bridges: [br0]
+    podCIDR: 10.244.0.0/16
+    cni: external
+  controlPlane:
+    replicas: 3
+    vcpus: 2
+    memory: 6Gi
+    diskSize: 40Gi

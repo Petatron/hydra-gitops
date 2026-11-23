@@ -92,7 +92,8 @@ spec:
             #                   so none of its nodes ever counts as underutilised.
             #                   One of its two workers runs all of Argo CD, and
             #                   nothing in this cluster has a PodDisruptionBudget.
-            #   pool-compute    Scaled up and down by CA as demand changes.
+            #   hydra-wl0-compute  Scaled up and down by CA as demand changes
+            #                   (pool-compute until PET-96).
             #
             # The exemption holds because a node counts as underutilised only
             # when utilisation <= threshold, and every md-0 node's DaemonSets

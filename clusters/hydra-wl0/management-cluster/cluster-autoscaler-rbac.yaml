@@ -117,7 +117,9 @@ rules:
       - machinedeployments/scale
     resourceNames:
       - hydra-wl0-md-0
-      - pool-compute
+      # The compute pool, named by the hydra CLI (clusters/hydra-wl0/hydra.yaml).
+      # It replaced the hand-made pool-compute on 2026-11-23 (PET-96).
+      - hydra-wl0-compute
     verbs:
       - get
       - patch

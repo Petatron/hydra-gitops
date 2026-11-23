@@ -15,6 +15,9 @@ KUBERNETES_VERSION = "1.35.3"
 K8S_SCHEMAS = "07b64c5376535fbbd6fb9910621e1a41f7613c14"
 CRD_SCHEMAS = "866b2653a5334db9aed20ad74701e20fd464471b"
 KUSTOMIZATIONS = {"kustomization.yaml", "kustomization.yml", "Kustomization"}
+# hydra.yaml, the input of the `hydra` CLI (Petatron/hydra). Checked by rendering
+# it, which applies the CLI's own strict parsing, defaults and validation.
+HYDRA_CLUSTER_CONFIG = ("hydra.io/v1alpha1", "ClusterConfig")
 # Argo CD's two spellings for "the cluster this Argo CD runs in".
 IN_CLUSTER_SERVER = "https://kubernetes.default.svc"
 IN_CLUSTER_NAME = "in-cluster"
@@ -209,6 +212,10 @@ def inspect_document(value, root, label, resources, origin, ancestors=None, requ
             ("kustomize.config.k8s.io/v1beta1", "Kustomization"),
             ("kustomize.config.k8s.io/v1alpha1", "Component"),
         )
+        if (api, kind) == HYDRA_CLUSTER_CONFIG:
+            # Not a Kubernetes resource: the hydra CLI's own input. kubeconform
+            # has no schema for it; _validate renders it with hydra instead.
+            return
         if isinstance(kind, str) and isinstance(api, str) and not is_kustomize and (api, kind) != ("v1", "List"):
             resources.append(value)
     inspect(value, root, label, resources, origin, ancestors)
@@ -302,6 +309,22 @@ def schema_validate(resources, label, cache):
         print(f"{label}: {result.stdout.strip()}")
 
 
+def hydra_validate(path, documents, label):
+    """Check a hydra.yaml by rendering it with the pinned hydra CLI."""
+    configs = [d for d in documents if isinstance(d, dict)
+               and (d.get("apiVersion"), d.get("kind")) == HYDRA_CLUSTER_CONFIG]
+    if not configs:
+        return
+    if len(documents) != 1:
+        # hydra reads one ClusterConfig per file; a second document would be
+        # silently ignored by the CLI.
+        raise Invalid(f"{label}: a hydra ClusterConfig must be the only document in its file")
+    result = run(["hydra", "cluster", "render", "-f", str(path)], label)
+    if result.returncode:
+        raise Invalid(f"{label}: hydra cluster render failed\n{result.stderr}")
+    print(f"{label}: hydra ClusterConfig renders")
+
+
 def validate(root):
     with tempfile.TemporaryDirectory(prefix="gitops-schema-cache-") as cache:
         _validate(root, cache)
@@ -328,9 +351,11 @@ def _validate(root, cache):
             continue
         label = str(path.relative_to(root))
         resources = []
-        for document in parse(path.read_text(), label):
+        documents = list(parse(path.read_text(), label))
+        for document in documents:
             inspect_document(document, root, label, resources, path.relative_to(root))
         schema_validate(resources, label, cache)
+        hydra_validate(path, documents, label)
         if path.name in KUSTOMIZATIONS:
             builds.add(path.parent)
     for directory in sorted(builds):

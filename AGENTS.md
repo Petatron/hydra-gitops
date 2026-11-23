@@ -78,6 +78,11 @@ python scripts/ci/validate.py                       # all YAML/JSON + rendered K
 It also enforces source boundaries (no self-repository URL sprawl), rejects duplicate YAML keys, and
 requires Helm image pins.
 
+Each cluster's `clusters/<name>/hydra.yaml` (the `hydra` CLI's input, PET-96) is not a Kubernetes
+resource and is never reconciled by Argo CD. `validate.py` checks it by rendering it with the `hydra`
+binary that `install-tools.sh` pins (v0.4.0), not with kubeconform. Bump that pin, with its checksums,
+when a hydra.yaml needs a newer CLI.
+
 Schemas under `schemas/` are **generated, not hand-written** — pinned to immutable upstream commits
 and regenerated with kubeconform's `openapi2jsonschema.py`. Refresh them per `schemas/README.md`;
 never edit the JSON by hand. When the provider's CRDs change, the pinned Hydra schema revision has to
