@@ -64,7 +64,8 @@ infrastructure/
 clusters/hydra-wl0/
 ├── README.md
 ├── root-app.yaml                  # Watches only clusters/hydra-wl0/apps/
-├── apps/                          # Cilium, shared storage, autoscaler Applications
+├── apps/                          # Shared storage and autoscaler Applications
+│                                  # (Cilium is hydra's: cni: hydra, via CAAPH)
 ├── cluster-autoscaler/            # Workload Deployment, RBAC, setup runbook
 └── management-cluster/            # Apply manually to management; never via Argo
                                    # (autoscaler RBAC, etcd backups, alerting)
