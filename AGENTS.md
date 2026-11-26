@@ -17,9 +17,13 @@ Argo CD configuration for **two** Kubernetes clusters, each with its own root Ap
 - **hydra-wl0** — the workload cluster Hydra itself created. Root:
   `clusters/hydra-wl0/root-app.yaml` → `clusters/hydra-wl0/apps/`.
 
-Applications self-heal drift and generally prune removed resources. The hydra-wl0 Cilium Application
-deliberately **disables pruning and omits the deletion finalizer**, so losing that Application does
-not take the CNI down with it. Preserve that.
+Applications self-heal drift and generally prune removed resources.
+
+**hydra-wl0's Cilium is not here.** Since PET-101 it is the `hydra` CLI's (`cni: hydra` in
+`clusters/hydra-wl0/hydra.yaml`): a HelmChartProxy on the management cluster that Cluster API Add-on
+Provider Helm reconciles. Never add an Argo CD Application for hydra-wl0's Cilium. Two controllers
+would reconcile the CNI, and deleting such an Application with a resources finalizer would take
+the CNI down.
 
 ```text
 .github/            # validate workflow, PR template, CODEOWNERS
@@ -28,7 +32,7 @@ schemas/            # pinned CRD JSON schemas and their provenance
 bootstrap/          # home cluster's one-time entry point (install.sh, root-app.yaml)
 apps/               # home cluster Applications — Argo CD, Cilium, KEDA, MetalLB
 infrastructure/     # home: namespaces, MetalLB pool, local-path storage
-clusters/hydra-wl0/ # hydra-wl0 Applications — Cilium, storage, Cluster Autoscaler
+clusters/hydra-wl0/ # hydra-wl0 Applications — storage, Cluster Autoscaler; hydra.yaml (hydra CLI)
   management-cluster/  # NOT reconciled by Argo CD — see below
 ```
 
@@ -80,7 +84,7 @@ requires Helm image pins.
 
 Each cluster's `clusters/<name>/hydra.yaml` (the `hydra` CLI's input, PET-96) is not a Kubernetes
 resource and is never reconciled by Argo CD. `validate.py` checks it by rendering it with the `hydra`
-binary that `install-tools.sh` pins (v0.4.0), not with kubeconform. Bump that pin, with its checksums,
+binary that `install-tools.sh` pins (v0.6.0), not with kubeconform. Bump that pin, with its checksums,
 when a hydra.yaml needs a newer CLI.
 
 Schemas under `schemas/` are **generated, not hand-written** — pinned to immutable upstream commits

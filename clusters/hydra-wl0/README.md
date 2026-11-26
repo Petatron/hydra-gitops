@@ -29,6 +29,19 @@ points straight at the top-level `infrastructure/storage`, because that manifest
 has nothing cluster-specific in it. Restructuring so the split is by *what varies*
 rather than by copy-paste is PET-18.
 
+## Cilium is hydra's, not Argo CD's
+
+Since PET-101, hydra-wl0's Cilium is installed and kept in step by Cluster API Add-on Provider Helm
+on the management cluster. The input is `cni: hydra` and `ciliumVersion` in [`hydra.yaml`](hydra.yaml),
+applied with the `hydra` CLI. Argo CD used to own it through `apps/cilium.yaml`; that Application had
+no finalizer, so deleting it left Cilium running for CAAPH to keep.
+
+- **Change Cilium** (version, MTU) in `hydra.yaml`, then `hydra cluster plan` and `hydra cluster apply`.
+- **Never add an Argo CD Application for it** here, and never remove the Cluster's
+  `cni.hydra.io/cilium` label: that uninstalls Cilium from the running cluster.
+- **`kube-system/cilium-ca` is not rendered by the chart** (Hubble certificates come from certgen). It
+  carries `helm.sh/resource-policy: keep`; do not delete it, or certgen mints a new CA.
+
 ## Bootstrapping
 
 ```
