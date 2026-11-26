@@ -30,8 +30,9 @@ download 'https://github.com/kubernetes-sigs/kustomize/releases/download/kustomi
 download 'https://github.com/rhysd/actionlint/releases/download/v1.7.12' \
   "actionlint_1.7.12_${os}_${arch}.tar.gz" actionlint
 # hydra ships bare binaries, not archives. It checks each cluster's hydra.yaml
-# (validate.py renders it); v0.4.0 is the first release that knows
-# spec.network.cni. The hydra-* lines in tool-checksums.txt are v0.4.0's.
+# (validate.py renders it); v0.6.0 is the first release that installs Cilium
+# through Cluster API Add-on Provider Helm (cni: hydra, ciliumVersion, PET-100).
+# The hydra-* lines in tool-checksums.txt are v0.6.0's.
 download_binary() {
   local base="$1" asset="$2" binary="$3"
   curl --fail --silent --show-error --location --retry 3 "$base/$asset" -o "$asset"
@@ -40,5 +41,5 @@ download_binary() {
   shasum -a 256 -c selected-checksum
   install -m 0755 "$asset" "$dest/$binary"
 }
-download_binary 'https://github.com/Petatron/hydra/releases/download/v0.4.0' \
+download_binary 'https://github.com/Petatron/hydra/releases/download/v0.6.0' \
   "hydra-$os-$arch" hydra

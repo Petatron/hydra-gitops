@@ -4,12 +4,17 @@
 #   hydra cluster plan -f clusters/hydra-wl0/hydra.yaml --management-kubeconfig <hydra-mgmt kubeconfig>
 # Values are this site's (the reference lab), not defaults.
 #
+# Cilium is hydra's (cni: hydra, PET-101): a HelmChartProxy that Cluster API
+# Add-on Provider Helm reconciles from Hydra's canonical values at
+# ciliumVersion. It took over the Cilium Argo CD had installed; the first apply
+# needed --adopt-cni, since the cluster was already running. Never set
+# cni: external here: dropping the Cluster's CNI label uninstalls Cilium, and
+# hydra refuses it.
+#
 # Outside this file, deliberately:
 # - hycluster-worker-0, the hypervisor host joined to this cluster as a worker
 #   by hand. It has no Cluster API Machine, runs Argo CD and holds radar's
 #   local-path volumes, and hydra does not manage it.
-# - Cilium: installed by Argo CD (apps/cilium.yaml) with Hydra's canonical
-#   values, so the CNI is external here.
 # - md-0's Cluster Autoscaler exemption
 #   (cluster.x-k8s.io/autoscaling-options-scaledownutilizationthreshold: "0"),
 #   which hydra.yaml cannot express yet. Server-side apply leaves it in place;
@@ -29,7 +34,9 @@ spec:
     controlPlaneEndpoint: 192.168.15.10
     bridges: [br0]
     podCIDR: 10.244.0.0/16
-    cni: external
+    cni: hydra
+    ciliumVersion: 1.19.1
+    mtu: 1500
   controlPlane:
     replicas: 3
     vcpus: 4
