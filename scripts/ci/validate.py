@@ -319,6 +319,16 @@ def hydra_validate(path, documents, label):
         # hydra reads one ClusterConfig per file; a second document would be
         # silently ignored by the CLI.
         raise Invalid(f"{label}: a hydra ClusterConfig must be the only document in its file")
+    # hydra-deployer keys ordering, backups and state on the directory, and
+    # deploys to `default` only: the cluster hydra targets must be the one the
+    # directory names.
+    rel = path.parts[-3:]
+    if len(rel) == 3 and rel[0] == "clusters" and rel[2] == "hydra.yaml":
+        metadata = configs[0].get("metadata") or {}
+        if metadata.get("name") != rel[1]:
+            raise Invalid(f"{label}: metadata.name must be the directory's name {rel[1]!r}, got {metadata.get('name')!r}")
+        if metadata.get("namespace") not in (None, "default"):
+            raise Invalid(f"{label}: metadata.namespace must be default (hydra-deployer deploys there only)")
     result = run(["hydra", "cluster", "render", "-f", str(path)], label)
     if result.returncode:
         raise Invalid(f"{label}: hydra cluster render failed\n{result.stderr}")

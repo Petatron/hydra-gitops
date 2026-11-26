@@ -133,6 +133,18 @@ class ValidationTests(unittest.TestCase):
         self.write("clusters/c/hydra.yaml", self.hydra_config(cni="external", mtu=1500))
         self.run_validation("hydra cluster render failed")
 
+    def test_hydra_config_name_must_match_its_directory(self):
+        config = self.hydra_config(cni="external")
+        config["metadata"]["name"] = "hydra-mgmt"
+        self.write("clusters/c/hydra.yaml", config)
+        self.run_validation("metadata.name must be the directory's name")
+
+    def test_hydra_config_namespace_must_be_default(self):
+        config = self.hydra_config(cni="external")
+        config["metadata"]["namespace"] = "other"
+        self.write("clusters/c/hydra.yaml", config)
+        self.run_validation("metadata.namespace must be default")
+
     def test_unknown_hydra_config_field(self):
         self.write("clusters/c/hydra.yaml", self.hydra_config(notAField=True))
         self.run_validation("hydra cluster render failed")

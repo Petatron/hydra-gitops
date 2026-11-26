@@ -10,10 +10,14 @@
 # else:
 #
 # - The Cluster API, Hydra, kubeadm and CAAPH objects hydra renders, prunes or
-#   reads, in `default` only, where the clusters live. Delete is included:
-#   apply prunes superseded templates and unprotected addons (Yibo,
-#   2026-11-26). It never deletes a pool without --prune-pools, nor the CNI,
-#   and the agent never passes --prune-pools or --allow-remove.
+#   reads, in `default` only, where the clusters live. Delete only on what
+#   apply prunes: superseded machine and bootstrap templates, and the proxies
+#   of unprotected addons (Yibo, 2026-11-26). Never on Clusters, control
+#   planes, MachineDeployments or health checks: deleting a Cluster deletes
+#   the cluster, hydra-mgmt's own included, and the agent never passes
+#   --prune-pools or --allow-remove.
+# - The `default` Namespace itself, get and patch: apply server-side applies
+#   the cluster's namespace before its objects.
 # - Secrets: get, by name only. Each cluster's kubeconfig (apply's wait and
 #   --kubeconfig-out) and libvirt credentials (create's checks). A cluster
 #   added to the repository needs its names added here.
@@ -56,13 +60,13 @@ metadata:
 rules:
   - apiGroups: ["cluster.x-k8s.io"]
     resources: ["clusters", "machinedeployments", "machinehealthchecks"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
   - apiGroups: ["cluster.x-k8s.io"]
     resources: ["machines", "machinesets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["controlplane.cluster.x-k8s.io"]
     resources: ["kubeadmcontrolplanes"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
   - apiGroups: ["bootstrap.cluster.x-k8s.io"]
     resources: ["kubeadmconfigtemplates"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
@@ -70,7 +74,10 @@ rules:
     resources: ["kubeadmconfigs"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["infrastructure.cluster.x-k8s.io"]
-    resources: ["hydraclusters", "hydramachinetemplates"]
+    resources: ["hydraclusters"]
+    verbs: ["get", "list", "watch", "create", "patch", "update"]
+  - apiGroups: ["infrastructure.cluster.x-k8s.io"]
+    resources: ["hydramachinetemplates"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   - apiGroups: ["infrastructure.cluster.x-k8s.io"]
     resources: ["hydramachines"]
@@ -111,6 +118,10 @@ rules:
   - apiGroups: ["clusterctl.cluster.x-k8s.io"]
     resources: ["providers"]
     verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["default"]
+    verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -101,8 +101,9 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
-      # A backup (15m) plus an apply (25m), with room.
-      activeDeadlineSeconds: 3000
+      # Worst case: a workload plan and apply, then hydra-mgmt's plan, backup
+      # and apply (5m + 25m + 5m + 15m + 25m), with room.
+      activeDeadlineSeconds: 5400
       template:
         spec:
           serviceAccountName: hydra-deployer
@@ -132,6 +133,10 @@ spec:
                   value: hydra-deployer
                 - name: STATE_CONFIGMAP
                   value: hydra-deployer-state
+                # GitHub logins whose merge, or approval at a PR's final head,
+                # lets a planned change be applied (CODEOWNERS).
+                - name: APPROVERS
+                  value: Eyasluna
                 # Applied after every workload cluster, and only after its backup.
                 - name: MANAGEMENT_CLUSTERS
                   value: hydra-mgmt

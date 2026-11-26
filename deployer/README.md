@@ -15,20 +15,31 @@ writers.
   - `failure`: apply would refuse (`!` lines);
   - `error`: plan failed.
 
-  It plans again only when the PR's head moves.
+  It plans again when the PR's head moves, or ten minutes after a plan that failed.
+
+  **The comment is for reading only.** The agent records what it planned in its own state: the PR's
+  head, the sha256 of each `hydra.yaml`, and each plan's hash. Nothing typed into a comment can approve
+  anything.
 - **Apply.** For each cluster on `main`, when the newest commit touching its `hydra.yaml` has not been
   applied, it plans `main` again.
   - **No changes:** the commit is recorded as applied.
-  - **Changes:** the agent applies only if the commit came from a merged PR, **the plan is exactly the
-    one posted on that PR** (the merge is the approval; a different plan means something drifted), and
-    there is no refusal.
+  - **Changes:** the agent applies only if all of these hold:
+    - the commit came from a PR **merged into `main`**;
+    - the agent planned that PR **at its final head**;
+    - the `hydra.yaml` is **byte for byte the one it planned**;
+    - **the plan is the same now** (a different plan means something drifted);
+    - there is no refusal;
+    - **an approver** (`APPROVERS`, today `Eyasluna`) merged the PR, or approved it at that head.
   - **Order:** workload clusters first. `hydra-mgmt` goes last, after an etcd backup Job, and not at
     all in a run where a workload apply failed.
   - **Reporting:** it sets the commit status `hydra/apply/<cluster>` and comments the result on the PR.
   - **Failure:** a failed apply is retried with backoff (2 minutes, doubling, at most an hour). A
     blocked commit is reported once and left alone.
+- **Identity check:** a `hydra.yaml` whose `metadata.name` is not its directory's name, or whose
+  namespace is not `default`, is never planned or applied. The validator refuses it too.
 - **Never:** it never deletes a cluster, passes `--prune-pools` or `--allow-remove`, or applies a
-  direct push to `main`.
+  direct push to `main`. Its hydra-mgmt identity cannot delete Clusters, control planes, pools or
+  health checks at all.
 
 State lives in the ConfigMap `hydra-deployer/hydra-deployer-state` on hlcluster, with keys
 `<cluster>.applied`, `.blocked`, `.pending`, `.failures` and `.retry-after`.
@@ -92,7 +103,8 @@ Root is not needed. Each step names its cluster.
 | An apply keeps **failing** | The PR comment has the first failure's output; later retries only log (`kubectl -n hydra-deployer logs job/<latest>`). Fix the cause; the next retry picks it up. Rerunning apply is always safe (stateless) |
 | **Pause** the agent | `kubectl -n hydra-deployer patch cronjob hydra-deployer -p '{"spec":{"suspend":true}}'`; resume with `false` |
 | **Upgrade hydra** | Bump the pin in `scripts/ci/install-tools.sh` and `tool-checksums.txt`, and `HYDRA_VERSION`/`HYDRA_SHA256` in `manifests/hlcluster.yaml` (a test keeps them equal), then `kubectl apply -k deployer/` |
-| Add a **cluster** | Add its kubeconfig and credentials Secret names to `resourceNames` in `manifests/hydra-mgmt-access.yaml` and apply it to hydra-mgmt. Add it to `MANAGEMENT_CLUSTERS`/`BACKUP_CRONJOBS` if it is a management cluster |
+| Add a **cluster** | **First** add its kubeconfig and credentials Secret names to `resourceNames` in `manifests/hydra-mgmt-access.yaml` and apply it to hydra-mgmt; otherwise its first apply fails on the kubeconfig and retries hourly. Add it to `MANAGEMENT_CLUSTERS`/`BACKUP_CRONJOBS` if it is a management cluster |
+| Two PRs change **one cluster** before the first is applied | Only the newest commit is considered, and its plan (made before the first was applied) no longer matches, so it is blocked. Apply by hand, or merge a no-op follow-up to get a fresh plan |
 
 ## Rotating credentials
 
