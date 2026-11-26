@@ -1,0 +1,201 @@
+# ############################################################################
+# APPLIED TO hlcluster -- not to hydra-mgmt. Nothing here is synced by Argo CD.
+# Apply the whole agent with Kustomize, which also packages deployer.py:
+#
+#   kubectl --context <hlcluster> apply -k deployer/
+#
+# Two Secrets are created by hand first, and never committed (deployer/README.md):
+#   hydra-deployer-github    key "token": a fine-grained GitHub token for this repository only
+#   hydra-deployer-mgmt-api  keys "token", "ca.crt": hydra-mgmt's hydra-deployer ServiceAccount
+# ############################################################################
+#
+# hydra-deployer (PET-102): plans hydra.yaml changes on PRs and applies them
+# after merge. See deployer/deployer.py for what it does and deployer/README.md
+# for operating it.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hydra-deployer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hydra-deployer
+  namespace: hydra-deployer
+automountServiceAccountToken: true
+---
+# Its own state: which commit each cluster was last applied at.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hydra-deployer-state
+  namespace: hydra-deployer
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["hydra-deployer-state"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hydra-deployer-state
+  namespace: hydra-deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hydra-deployer-state
+subjects:
+  - kind: ServiceAccount
+    name: hydra-deployer
+    namespace: hydra-deployer
+---
+# An etcd backup of hydra-mgmt before it is applied: a Job from the existing
+# backup CronJob, as `kubectl create job --from=cronjob/...` makes one.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hydra-deployer-backup
+  namespace: hydra-backup
+rules:
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    resourceNames: ["etcd-backup-hydra-mgmt"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hydra-deployer-backup
+  namespace: hydra-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hydra-deployer-backup
+subjects:
+  - kind: ServiceAccount
+    name: hydra-deployer
+    namespace: hydra-deployer
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hydra-deployer
+  namespace: hydra-deployer
+spec:
+  schedule: "*/2 * * * *"
+  timeZone: Etc/UTC
+  # One run at a time, so one apply per cluster at a time. A run that is still
+  # applying makes the next ones skip.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 110
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      # A backup (15m) plus an apply (25m), with room.
+      activeDeadlineSeconds: 3000
+      template:
+        spec:
+          serviceAccountName: hydra-deployer
+          restartPolicy: Never
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: deployer
+              image: docker.io/library/python:3.13-slim@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50
+              command: ["python3", "/opt/deployer/deployer.py"]
+              env:
+                - name: GITHUB_REPOSITORY
+                  value: Petatron/hydra-gitops
+                - name: BRANCH
+                  value: main
+                - name: GITHUB_TOKEN_FILE
+                  value: /etc/hydra-deployer/github/token
+                - name: STATE_NAMESPACE
+                  value: hydra-deployer
+                - name: STATE_CONFIGMAP
+                  value: hydra-deployer-state
+                # Applied after every workload cluster, and only after its backup.
+                - name: MANAGEMENT_CLUSTERS
+                  value: hydra-mgmt
+                - name: BACKUP_CRONJOBS
+                  value: hydra-mgmt=hydra-backup/etcd-backup-hydra-mgmt
+                - name: MGMT_SERVER
+                  value: https://192.168.15.11:6443
+                - name: MGMT_API_DIR
+                  value: /etc/hydra-deployer/mgmt-api
+                # The same hydra the validator uses: scripts/ci/install-tools.sh
+                # and tool-checksums.txt (hydra-linux-amd64). A test keeps the
+                # three equal.
+                - name: HYDRA_VERSION
+                  value: v0.6.0
+                - name: HYDRA_SHA256
+                  value: 7be92d952da3ba1a7985e8b6351e0b9c9acd658c12aef57f36e49f4d5d4c5cd4
+                - name: WORKDIR
+                  value: /work
+                - name: HOME
+                  value: /work
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  memory: 512Mi
+              volumeMounts:
+                - name: script
+                  mountPath: /opt/deployer
+                  readOnly: true
+                - name: work
+                  mountPath: /work
+                - name: tmp
+                  mountPath: /tmp
+                - name: github
+                  mountPath: /etc/hydra-deployer/github
+                  readOnly: true
+                - name: mgmt-api
+                  mountPath: /etc/hydra-deployer/mgmt-api
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: hydra-deployer-script
+            # The hydra binary, the management kubeconfig and any workload
+            # kubeconfig apply writes: memory only, gone with the pod.
+            - name: work
+              emptyDir:
+                medium: Memory
+                sizeLimit: 256Mi
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Mi
+            - name: github
+              secret:
+                secretName: hydra-deployer-github
+                defaultMode: 0400
+            - name: mgmt-api
+              secret:
+                secretName: hydra-deployer-mgmt-api
+                defaultMode: 0400

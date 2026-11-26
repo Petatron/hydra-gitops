@@ -38,5 +38,7 @@ jobs:
         run: actionlint
       - name: Prove validation rejects broken inputs
         run: python -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - name: Test hydra-deployer
+        run: python -m unittest discover -s deployer -p 'test_*.py' -v
       - name: Validate repository and Kustomize output
         run: python scripts/ci/validate.py

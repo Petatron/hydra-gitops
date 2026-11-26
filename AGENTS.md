@@ -33,6 +33,8 @@ bootstrap/          # home cluster's one-time entry point (install.sh, root-app.
 apps/               # home cluster Applications — Argo CD, Cilium, KEDA, MetalLB
 infrastructure/     # home: namespaces, MetalLB pool, local-path storage
 clusters/hydra-wl0/ # hydra-wl0 Applications — storage, Cluster Autoscaler; hydra.yaml (hydra CLI)
+deployer/           # hydra-deployer (PET-102): plans/applies clusters/*/hydra.yaml from hlcluster.
+                    #   Applied by hand (`kubectl apply -k deployer/` on hlcluster); never by Argo CD
   management-cluster/  # NOT reconciled by Argo CD — see below
 ```
 
@@ -83,7 +85,11 @@ It also enforces source boundaries (no self-repository URL sprawl), rejects dupl
 requires Helm image pins.
 
 Each cluster's `clusters/<name>/hydra.yaml` (the `hydra` CLI's input, PET-96) is not a Kubernetes
-resource and is never reconciled by Argo CD. `validate.py` checks it by rendering it with the `hydra`
+resource and is never reconciled by Argo CD. **It is deployed by hydra-deployer** (`deployer/`, PET-102):
+a same-repository PR touching it gets a `hydra cluster plan` comment and a `hydra/plan` status, and
+after merge the agent applies it, but only if the plan is still the one posted on the PR. A merge to
+`main` that changes a hydra.yaml therefore changes a live cluster within minutes. Read the plan
+comment before approving. `validate.py` checks it by rendering it with the `hydra`
 binary that `install-tools.sh` pins (v0.6.0), not with kubeconform. Bump that pin, with its checksums,
 when a hydra.yaml needs a newer CLI.
 

@@ -1,0 +1,126 @@
+# ############################################################################
+# APPLIED TO hydra-mgmt -- not to hlcluster. Nothing here is synced by Argo CD.
+#
+#   kubectl --kubeconfig <hydra-mgmt> apply -f deployer/manifests/hydra-mgmt-access.yaml
+# ############################################################################
+#
+# The identity hydra-deployer (PET-102) runs `hydra cluster plan` and
+# `hydra cluster apply` with, from hlcluster. It is what those two commands
+# need for the clusters whose hydra.yaml lives in this repository, and nothing
+# else:
+#
+# - The Cluster API, Hydra, kubeadm and CAAPH objects hydra renders, prunes or
+#   reads, in `default` only, where the clusters live. Delete is included:
+#   apply prunes superseded templates and unprotected addons (Yibo,
+#   2026-11-26). It never deletes a pool without --prune-pools, nor the CNI,
+#   and the agent never passes --prune-pools or --allow-remove.
+# - Secrets: get, by name only. Each cluster's kubeconfig (apply's wait and
+#   --kubeconfig-out) and libvirt credentials (create's checks). A cluster
+#   added to the repository needs its names added here.
+# - clusterctl's provider inventory, read-only (the addon-provider check).
+#
+# Then copy its token and CA into the Secret the CronJob mounts on hlcluster,
+# without printing either (see deployer/README.md):
+#
+#   kubectl --kubeconfig <hydra-mgmt> -n hydra-deployer-access get secret hydra-deployer-token -o json \
+#     | jq '{apiVersion:"v1",kind:"Secret",type:"Opaque",
+#            metadata:{name:"hydra-deployer-mgmt-api",namespace:"hydra-deployer"},
+#            data:{token:.data.token,"ca.crt":.data["ca.crt"]}}' \
+#     | kubectl --context <hlcluster> apply --server-side --field-manager=hydra-deployer-access -f -
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hydra-deployer-access
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hydra-deployer
+  namespace: hydra-deployer-access
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hydra-deployer-token
+  namespace: hydra-deployer-access
+  annotations:
+    kubernetes.io/service-account.name: hydra-deployer
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hydra-deployer
+  namespace: default
+rules:
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["clusters", "machinedeployments", "machinehealthchecks"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machines", "machinesets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["controlplane.cluster.x-k8s.io"]
+    resources: ["kubeadmcontrolplanes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["bootstrap.cluster.x-k8s.io"]
+    resources: ["kubeadmconfigtemplates"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["bootstrap.cluster.x-k8s.io"]
+    resources: ["kubeadmconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["infrastructure.cluster.x-k8s.io"]
+    resources: ["hydraclusters", "hydramachinetemplates"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["infrastructure.cluster.x-k8s.io"]
+    resources: ["hydramachines"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["addons.cluster.x-k8s.io"]
+    resources: ["helmchartproxies"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["addons.cluster.x-k8s.io"]
+    resources: ["helmreleaseproxies", "clusterresourcesets", "clusterresourcesetbindings"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["hydra-wl0-kubeconfig", "hydra-mgmt-kubeconfig", "hydra-wl0-libvirt-pki"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hydra-deployer
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hydra-deployer
+subjects:
+  - kind: ServiceAccount
+    name: hydra-deployer
+    namespace: hydra-deployer-access
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hydra-deployer-read-providers
+rules:
+  - apiGroups: ["clusterctl.cluster.x-k8s.io"]
+    resources: ["providers"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hydra-deployer-read-providers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hydra-deployer-read-providers
+subjects:
+  - kind: ServiceAccount
+    name: hydra-deployer
+    namespace: hydra-deployer-access
