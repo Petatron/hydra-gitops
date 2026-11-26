@@ -92,12 +92,15 @@ spec:
     server: https://kubernetes.default.svc
     namespace: kube-system
   syncPolicy:
-    automated:
-      # prune is deliberately off. The CNI is the one add-on whose removal takes
-      # the cluster with it, and Argo adopting a Helm-installed release will not
-      # match it resource-for-resource on the first pass.
-      prune: false
-      selfHeal: true
+    # Manual sync since PET-101: Cilium is being handed to Cluster API Add-on
+    # Provider Helm (hydra's cni: hydra), and two controllers must not both
+    # reconcile the CNI during the takeover. Argo CD keeps showing this app's
+    # sync state but no longer applies it on its own; do not sync it by hand.
+    # After the takeover this Application is deleted (PET-101); having no
+    # finalizer, that leaves Cilium running under CAAPH.
+    #
+    # Before PET-101 this was automated with selfHeal and prune off (the CNI is
+    # the one add-on whose removal takes the cluster with it).
     syncOptions:
       # Required to adopt objects Helm already owns without fighting over the
       # managed-by metadata.
