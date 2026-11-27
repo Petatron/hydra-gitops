@@ -28,9 +28,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # The federated identity trusts only this environment's OIDC subject
-    # (repo:Petatron/hydra-gitops:environment:lab), and the environment allows
+    # (repo:Petatron/hydra-gitops:environment:lab-deploy), and the environment allows
     # only main.
-    environment: lab
+    environment: lab-deploy
     permissions:
       id-token: write # the Tailscale action exchanges GitHub's OIDC token
     env:
@@ -44,7 +44,7 @@ jobs:
             [ -n "${!v}" ] || missing+=("$v")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::set these secrets on the 'lab' environment: ${missing[*]}"
+            echo "::error::set these secrets on the 'lab-deploy' environment: ${missing[*]}"
             exit 1
           fi
         env:
