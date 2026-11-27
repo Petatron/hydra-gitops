@@ -1,0 +1,144 @@
+name: hydra deploy
+
+# PET-102: plan clusters/*/hydra.yaml on pull requests, apply the reviewed plan
+# after merge. The decisions live in scripts/ci/hydra_deploy.py (tested by the
+# validate workflow); read its docstring before changing anything here.
+#
+# Safety, in short:
+# - pull_request_target runs this file and the scripts as they are on main.
+#   A PR's hydra.yaml files are read as data from git objects; nothing from a
+#   PR is checked out or run. PRs from forks are never planned.
+# - The lab-deploy environment holds the management cluster's kubeconfig and
+#   allows only main (pull_request_target runs on main). Its token's identity
+#   (ci/hydra-mgmt-access.yaml) cannot delete clusters, control planes, pools
+#   or health checks.
+# - Apply runs only the plan recorded on the merged PR's final head, and only
+#   if planning main again gives the same plan. hydra-mgmt is plan-only.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths: ['clusters/*/hydra.yaml']
+  push:
+    branches: [main]
+    paths: ['clusters/*/hydra.yaml']
+
+permissions: {}
+
+jobs:
+  plan:
+    if: >-
+      github.event_name == 'pull_request_target'
+      && github.event.pull_request.base.ref == 'main'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    name: hydra plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: lab-deploy
+    concurrency:
+      group: hydra-plan-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      id-token: write       # Tailscale workload identity federation
+      pull-requests: write  # the plan comment
+      statuses: write       # hydra/plan
+    steps:
+      # main, not the PR nor its base branch: the scripts and pins that run
+      # with the secrets here are main's.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - &python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - &tools
+        name: Install pinned tools
+        run: |
+          python -m pip install --require-hashes -r scripts/ci/requirements.txt
+          bash scripts/ci/install-tools.sh "$RUNNER_TEMP/bin"
+      - &tailnet
+        name: Join the tailnet (ephemeral, tag:git-ci)
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OIDC_CLIENT_ID }}
+          audience: ${{ secrets.TS_OIDC_AUDIENCE }}
+          tags: tag:git-ci
+          hostname: gha-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          version: '1.104.7'
+          sha256sum: e56693ff74a64f2591b7e819c280635a100aae1ddfb0ef058fcd052b7cd8d16c
+          use-cache: 'false'
+      - &kubeconfig
+        name: Management cluster kubeconfig
+        env:
+          KUBECONFIG_DATA: ${{ secrets.LAB_MGMT_KUBECONFIG }}
+        run: |
+          [ -n "$KUBECONFIG_DATA" ] || { echo "::error::set LAB_MGMT_KUBECONFIG on the lab-deploy environment (ci/README.md)"; exit 1; }
+          umask 077
+          printf '%s\n' "$KUBECONFIG_DATA" > "$RUNNER_TEMP/mgmt.kubeconfig"
+      - name: Plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/ci/hydra_deploy.py plan
+          --hydra "$RUNNER_TEMP/bin/hydra"
+          --kubeconfig "$RUNNER_TEMP/mgmt.kubeconfig"
+          --out "$RUNNER_TEMP/hydra-plan"
+      # plans.json exists only once the plan comment and status are posted.
+      # Apply looks for it by the PR head and trusts it only from this workflow
+      # on pull_request_target, made before the merge.
+      - name: Record the plan
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hydra-plan-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/hydra-plan/plans.json
+          if-no-files-found: ignore
+          retention-days: 90
+          overwrite: true
+      - &cleanup
+        name: Remove the kubeconfig
+        if: always()
+        run: rm -f "$RUNNER_TEMP/mgmt.kubeconfig"
+
+  apply:
+    if: github.event_name == 'push'
+    name: hydra apply
+    runs-on: ubuntu-24.04
+    # A plan (10m) and an apply (45m) per workload cluster, plus plans of
+    # plan-only clusters.
+    timeout-minutes: 150
+    environment: lab-deploy
+    # One apply at a time, never cancelled half way. GitHub keeps only the
+    # newest waiting run; each run evaluates every cluster at main's tip, so a
+    # waiting run it drops, or a merge that started no run, loses nothing.
+    concurrency:
+      group: hydra-apply
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read         # the plan artifact
+      id-token: write       # Tailscale workload identity federation
+      pull-requests: write  # the result comment on the merged PR
+      statuses: write       # hydra/apply/<cluster>: a plan is applied at most once
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - *python
+      - *tools
+      - *tailnet
+      - *kubeconfig
+      - name: Apply the reviewed plans
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/ci/hydra_deploy.py apply
+          --hydra "$RUNNER_TEMP/bin/hydra"
+          --kubeconfig "$RUNNER_TEMP/mgmt.kubeconfig"
+      - *cleanup

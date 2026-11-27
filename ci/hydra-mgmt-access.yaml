@@ -1,0 +1,220 @@
+# ############################################################################
+# APPLIED TO hydra-mgmt BY HAND, by a person. Nothing here is synced by Argo CD.
+#
+#   kubectl --kubeconfig <hydra-mgmt admin> apply -f ci/hydra-mgmt-access.yaml
+#
+# Then store the identity's kubeconfig as the lab-deploy environment secret
+# LAB_MGMT_KUBECONFIG without printing it: see ci/README.md.
+# ############################################################################
+#
+# The identity the hydra-deploy workflow (.github/workflows/hydra-deploy.yaml,
+# PET-102) runs `hydra cluster plan` and `hydra cluster apply` with, from a
+# GitHub-hosted runner that reaches hydra-mgmt's API through the tailnet. It is
+# what those two commands need for the clusters whose hydra.yaml lives in this
+# repository, and nothing else:
+#
+# - The Cluster API, Hydra, kubeadm and CAAPH objects hydra renders, prunes or
+#   reads, in `default` only, where the clusters live. `plan` needs the same
+#   write verbs as `apply`: it is a server-side dry-run apply, which Kubernetes
+#   authorizes like the real write.
+# - Delete only on what apply prunes by default: superseded machine and
+#   bootstrap templates, and the proxies of unprotected addons. Never on
+#   Clusters, control planes, MachineDeployments or health checks: deleting a
+#   Cluster deletes the cluster, hydra-mgmt's own included, and the workflow
+#   never passes --prune-pools or --allow-remove.
+# - The `default` Namespace itself, get and patch: apply server-side applies
+#   the cluster's namespace before its objects.
+# - Secrets: get, by name only. Each workload cluster's kubeconfig (apply's
+#   wait) and hypervisor credentials (apply's check, a full Get: this hands CI
+#   the hypervisor's client key). Never hydra-mgmt's own kubeconfig, which would
+#   make the token admin of the management cluster; hydra-mgmt is plan-only and
+#   plan does not read it. A cluster added to the repository needs its names
+#   added here before its first apply.
+#
+# What RBAC cannot express: plan needs the same write verbs as apply, so this
+# token can rewrite any cluster's objects in `default`, and changing a control
+# plane or bootstrap template is root on that cluster's nodes. It is admin of
+# the workload clusters by design: deploying them is its job. The policy at the
+# end of this file keeps it from *writing* anything of hydra-mgmt's (dry runs,
+# which plan makes, still pass), and from creating an addon proxy that selects
+# any cluster but its own. Without that policy the token would be admin of the
+# management cluster too.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hydra-ci-access
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hydra-ci
+  namespace: hydra-ci-access
+---
+# A long-lived token, because the workflow's kubeconfig is a stored secret.
+# Deleting this Secret revokes it; re-applying this file makes a new one.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hydra-ci-token
+  namespace: hydra-ci-access
+  annotations:
+    kubernetes.io/service-account.name: hydra-ci
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hydra-ci
+  namespace: default
+rules:
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["clusters", "machinedeployments", "machinehealthchecks"]
+    verbs: ["get", "list", "create", "patch", "update"]
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machines", "machinesets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["controlplane.cluster.x-k8s.io"]
+    resources: ["kubeadmcontrolplanes"]
+    verbs: ["get", "list", "create", "patch", "update"]
+  - apiGroups: ["bootstrap.cluster.x-k8s.io"]
+    resources: ["kubeadmconfigtemplates"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["bootstrap.cluster.x-k8s.io"]
+    resources: ["kubeadmconfigs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["infrastructure.cluster.x-k8s.io"]
+    resources: ["hydraclusters"]
+    verbs: ["get", "list", "create", "patch", "update"]
+  - apiGroups: ["infrastructure.cluster.x-k8s.io"]
+    resources: ["hydramachinetemplates"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["infrastructure.cluster.x-k8s.io"]
+    resources: ["hydramachines"]
+    verbs: ["get", "list"]
+  - apiGroups: ["addons.cluster.x-k8s.io"]
+    resources: ["helmchartproxies"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["addons.cluster.x-k8s.io"]
+    resources: ["helmreleaseproxies", "clusterresourcesets", "clusterresourcesetbindings"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["hydra-wl0-kubeconfig", "hydra-wl0-libvirt-pki"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hydra-ci
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hydra-ci
+subjects:
+  - kind: ServiceAccount
+    name: hydra-ci
+    namespace: hydra-ci-access
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hydra-ci
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["default"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hydra-ci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hydra-ci
+subjects:
+  - kind: ServiceAccount
+    name: hydra-ci
+    namespace: hydra-ci-access
+---
+# Applied with the rest of this file. CI may plan hydra-mgmt (dry runs) but
+# never change it: hydra-mgmt is applied by hand, after an etcd backup.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: hydra-ci-guard
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups:
+          - cluster.x-k8s.io
+          - controlplane.cluster.x-k8s.io
+          - bootstrap.cluster.x-k8s.io
+          - infrastructure.cluster.x-k8s.io
+          - addons.cluster.x-k8s.io
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["*/*"]  # every resource and subresource, should RBAC ever grant one
+  matchConditions:
+    - name: hydra-ci-only
+      expression: request.userInfo.username == 'system:serviceaccount:hydra-ci-access:hydra-ci'
+    - name: real-writes-only
+      expression: '!request.dryRun'
+  variables:
+    - name: protected
+      expression: "'hydra-mgmt'"
+    # hydra-mgmt's control-plane address (its Cluster's controlPlaneEndpoint).
+    - name: protectedEndpoint
+      expression: "'192.168.15.11'"
+    # Objects are hydra-mgmt's by hydra's label, Cluster API's label,
+    # spec.clusterName, or their name (pre-hydra leftovers carry no label).
+    - name: touchesProtected
+      expression: >-
+        [object, oldObject].exists(o, o != null && (
+          o.metadata.name == variables.protected ||
+          o.metadata.name.startsWith(variables.protected + '-') ||
+          (has(o.metadata.labels) && (
+            ('hydra.io/cluster' in o.metadata.labels && o.metadata.labels['hydra.io/cluster'] == variables.protected) ||
+            ('cluster.x-k8s.io/cluster-name' in o.metadata.labels && o.metadata.labels['cluster.x-k8s.io/cluster-name'] == variables.protected))) ||
+          (has(o.spec) && has(o.spec.clusterName) && o.spec.clusterName == variables.protected)))
+  validations:
+    - expression: '!variables.touchesProtected'
+      message: hydra CI may plan hydra-mgmt but never change it; apply hydra-mgmt by hand after an etcd backup
+    # A mistaken controlPlaneEndpoint must not be hydra-mgmt's address (kube-vip
+    # would contest hydra-mgmt's API). This catches a mistake, not someone
+    # holding the token: kube-vip's own manifest or a node command can still
+    # announce the address on the shared bridge (see ci/README.md).
+    - expression: >-
+        object == null || !has(object.spec) || !has(object.spec.controlPlaneEndpoint) ||
+        !has(object.spec.controlPlaneEndpoint.host) ||
+        object.spec.controlPlaneEndpoint.host != variables.protectedEndpoint
+      message: hydra CI may not give a cluster hydra-mgmt's control-plane address
+    # An addon proxy selects only its own cluster, the way hydra renders one:
+    # exactly one matchLabels entry, keyed cni.hydra.io/cilium or
+    # hydra.io/cluster, whose value is the proxy's own hydra.io/cluster label.
+    - expression: >-
+        object == null || object.kind != 'HelmChartProxy' || (
+          has(object.metadata.labels) && 'hydra.io/cluster' in object.metadata.labels &&
+          object.metadata.labels['hydra.io/cluster'] != '' &&
+          has(object.spec.clusterSelector) && has(object.spec.clusterSelector.matchLabels) &&
+          size(object.spec.clusterSelector.matchLabels) == 1 &&
+          (!has(object.spec.clusterSelector.matchExpressions) || size(object.spec.clusterSelector.matchExpressions) == 0) &&
+          object.spec.clusterSelector.matchLabels.all(k,
+            (k == 'cni.hydra.io/cilium' || k == 'hydra.io/cluster') &&
+            object.spec.clusterSelector.matchLabels[k] == object.metadata.labels['hydra.io/cluster']))
+      message: hydra CI may create an addon proxy only for its own cluster (one matchLabels entry, cni.hydra.io/cilium or hydra.io/cluster, equal to its hydra.io/cluster label)
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: hydra-ci-guard
+spec:
+  policyName: hydra-ci-guard
+  validationActions: ["Deny"]
