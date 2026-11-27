@@ -84,11 +84,15 @@ jobs:
             echo "|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Allowed: the bastion's SSH. Read its banner only; never log in.
+          # Allowed: the bastion's SSH. Exchange identification lines only (the
+          # first message of an SSH handshake); never log in. The client speaks
+          # first: Tailscale SSH sends its banner only after the client's,
+          # while OpenSSH does not mind either order.
           # Retry for up to 30s: a new node takes a moment to reach its peers.
           banner=
           for _ in 1 2 3 4 5 6; do
-            banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/$BASTION/22 && head -c 255 <&3 | head -n1" 2>/dev/null) && break
+            banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/$BASTION/22 && printf 'SSH-2.0-hydra-lab-check\\r\\n' >&3 && head -c 255 <&3 | head -n1" 2>/dev/null)
+            [[ "$banner" == SSH-2.0-* ]] && break
             sleep 5
           done
           if [[ "$banner" == SSH-2.0-* ]]; then
