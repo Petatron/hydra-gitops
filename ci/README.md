@@ -15,7 +15,12 @@ the lab. The decisions are in `scripts/ci/hydra_deploy.py`; its tests run in the
   - `failure`: a person has to look first. One of these happened:
     - a plan has a `!` line: a refusal, or a note such as the one-time unprotected control-plane
       roll;
-    - a `hydra.yaml` names a cluster other than its directory, or a namespace other than `default`.
+    - a `hydra.yaml` names a cluster other than its directory, or a namespace other than `default`;
+    - the plans do not fit in one comment. A plan the reviewer could not read in full is not
+      recorded, so merging applies nothing; the run's log has the full text;
+    - the PR also changes the deploy machinery (anything under `.github/`, `scripts/ci/` or
+      `ci/`). The plans are shown but not recorded, so merging applies nothing. See *Changing the
+      machinery* below.
   - `error`: planning failed.
 - **Merge.** Every run evaluates **every** cluster as `main`'s tip has it, so a run that GitHub
   dropped while it waited, or a merge that started no run, loses nothing. A cluster whose plan shows
@@ -139,10 +144,28 @@ can't. The token can also patch the `default` Namespace's labels, which apply ne
    It should get a plan comment saying "No changes" for that cluster. Merging it records "no changes"
    and applies nothing.
 
+## Changing the machinery
+
+The apply job runs on a push to `main`, so GitHub runs the workflow **as merged**, with the
+`lab-deploy` secrets. A change to the workflow, `scripts/ci/`, `ci/` or any other workflow (which
+can name `lab-deploy` too) is therefore deploy code with the token's rights, and the plan comment
+does not review it:
+
+- review such a PR as code, line by line; the green `hydra/plan` check says nothing about it;
+- keep it apart from `hydra.yaml` changes. A PR that mixes them gets `hydra/plan` = `failure`, and
+  its plans are not recorded, so merging it applies nothing. Note that this check is enforced by
+  the code on `main` at planning time; a merged change to the machinery can remove it, which is
+  why the review is what counts;
+- the control GitHub enforces whatever the merged code says is **required reviewers on the
+  `lab-deploy` environment**: then no job, rewritten or not, receives the secret without a person
+  approving the run. It is off today, because it makes every plan wait for approval as well (plan
+  needs the same secret). Branch protection on `main` (one approving review) is the gate instead.
+
 ## Operating it
 
 | Situation | What to do |
 |---|---|
+| A PR's plans were **not recorded** (too long, or the machinery changed too) | Merging applies nothing. Apply by hand after merging, or split the PR |
 | A cluster is **blocked** after merge | The run says why. Check `hydra cluster plan` locally. Then either apply by hand, or open a follow-up PR: it gets a fresh plan, and merging it applies that plan. Later runs report the block again until it is resolved |
 | Two PRs for **one cluster** merged close together | The cluster is checked against the newer PR's plan. If that plan predates the first apply, it no longer matches and the cluster is blocked. Open a follow-up PR, or apply by hand |
 | An apply **failed** | The run has hydra's output. Fix the cause, then apply by hand or open a follow-up PR. A plan is attempted at most once (`hydra/apply/<cluster>` on the PR's head), so re-running the run does not retry it; that is intended. Applying by hand is always safe to repeat |

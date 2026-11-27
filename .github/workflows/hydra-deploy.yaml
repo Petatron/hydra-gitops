@@ -106,7 +106,7 @@ jobs:
         run: rm -f "$RUNNER_TEMP/mgmt.kubeconfig"
 
   apply:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     name: hydra apply
     runs-on: ubuntu-24.04
     # A plan (10m) and an apply (45m) per workload cluster, plus plans of

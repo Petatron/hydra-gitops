@@ -97,6 +97,24 @@ class ClassifyTests(unittest.TestCase):
         state, desc = hd.plan_state({"hydra-mgmt": {"status": "changes"}})
         self.assertEqual(state, "success")
         self.assertIn("by hand", desc)
+        # With a workload change too, the check says merging applies it.
+        state, desc = hd.plan_state({"hydra-wl0": {"status": "changes"}, "hydra-mgmt": {"status": "changes"}})
+        self.assertEqual(state, "success")
+        self.assertIn("applies the workload plans", desc)
+        # Withheld plans fail the check, whatever the plans say.
+        state, desc = hd.plan_state({"hydra-wl0": {"status": "changes"}}, "deploy machinery changed")
+        self.assertEqual(state, "failure")
+        self.assertIn("merging applies nothing", desc)
+        for d in [desc, hd.plan_state({"hydra-wl0": {"status": "changes"}, "hydra-mgmt": {"status": "changes"}})[1]]:
+            self.assertLessEqual(len(d), 140)  # GitHub's limit for a status description
+
+    def test_machinery(self):
+        paths = ["clusters/hydra-wl0/hydra.yaml", ".github/workflows/hydra-deploy.yaml",
+                 "scripts/ci/hydra_deploy.py", "ci/hydra-mgmt-access.yaml", "apps/x.yaml",
+                 "clusters/hydra-wl0/ci/values.yaml"]
+        self.assertEqual(hd.machinery(paths), [".github/workflows/hydra-deploy.yaml",
+                                               "ci/hydra-mgmt-access.yaml", "scripts/ci/hydra_deploy.py"])
+        self.assertEqual(hd.machinery(["clusters/hydra-wl0/hydra.yaml"]), [])
 
 
 class DecideTests(unittest.TestCase):
@@ -150,6 +168,12 @@ class TrustTests(unittest.TestCase):
         got = [a["id"] for a in hd.candidate_artifacts(arts, sha, "2026-11-27T04:30:00Z")]
         self.assertEqual(got, [2, 1])  # newest first; never expired, foreign or post-merge
         self.assertEqual(hd.candidate_artifacts(arts, "c" * 40, "2026-11-27T04:30:00Z"), [])
+        # No creation time, or no merge time, fails closed.
+        undated = [{"name": name, "id": 6}, {"name": name, "created_at": "", "id": 7},
+                   {"name": name, "created_at": None, "id": 8}]
+        self.assertEqual(hd.candidate_artifacts(undated, sha, "2026-11-27T04:30:00Z"), [])
+        self.assertEqual(hd.candidate_artifacts(arts, sha, ""), [])
+        self.assertEqual(hd.candidate_artifacts(arts, sha, None), [])
 
     def test_trusted_run(self):
         good = {"path": hd.WORKFLOW_PATH, "event": "pull_request_target", "repository": {"full_name": REPO}}
@@ -191,6 +215,12 @@ class TrustTests(unittest.TestCase):
         stale = [{"number": 6, "merged_at": merged, "merge_commit_sha": "base", "base": {"ref": "main"}}]
         self.assertIsNone(hd.pick_pr(stale, "c1", "tip", isa))
         self.assertIsNone(hd.pick_pr([], "c1", "tip", isa))
+        # Two PRs carried c1 (#8 was built on #3's branch): the first merged
+        # brought it to main, whatever order the API lists them in.
+        both = [{"number": 8, "merged_at": "2026-11-27T02:00:00Z", "merge_commit_sha": "c2", "base": {"ref": "main"}},
+                {"number": 3, "merged_at": "2026-11-27T01:00:00Z", "merge_commit_sha": "c1", "base": {"ref": "main"}}]
+        self.assertEqual(hd.pick_pr(both, "c1", "tip", isa)["number"], 3)
+        self.assertEqual(hd.pick_pr(list(reversed(both)), "c1", "tip", isa)["number"], 3)
 
 
 
@@ -239,13 +269,15 @@ class CommentTests(unittest.TestCase):
         self.assertTrue(body.endswith("\n`````"))
 
     def test_plan_comment(self):
-        body = hd.plan_comment("f" * 40, {
+        body, complete = hd.plan_comment("f" * 40, {
             "hydra-wl0": plan(PLAN_CHANGES),
             "hydra-mgmt": plan(PLAN_NONE, yaml_text=WL0.replace("hydra-wl0", "hydra-mgmt")),
             "old": {"status": "deleted", "message": "hydra.yaml is removed."},
             "evil": {"status": "invalid", "message": "hydra.yaml has metadata.name '@someone <img src=x>'."},
         })
+        self.assertTrue(complete)
         self.assertTrue(body.startswith(hd.COMMENT_MARKER))
+        self.assertNotIn("applies nothing", body)
         self.assertIn("- `hydra-wl0`: Changes", body)
         self.assertIn("plan-only", body)
         self.assertIn("for reading only", body)
@@ -258,10 +290,24 @@ class CommentTests(unittest.TestCase):
         self.assertEqual(hd.open_fence("```diff\n- a"), "```")
 
     def test_plan_comment_is_bounded_and_keeps_its_summary(self):
-        body = hd.plan_comment("f" * 40, {"hydra-wl0": plan("~ x\n" * 40000), "b": plan("! refused y\n")})
+        body, complete = hd.plan_comment("f" * 40, {"hydra-wl0": plan("~ x\n" * 40000), "b": plan("! refused y\n")})
         self.assertLess(len(body), hd.COMMENT_LIMIT + 200)
         self.assertIn("- `b`: **Refused**", body)  # the summary comes before any plan
         self.assertEqual(hd.open_fence(body), "")
+        # A plan that is cut is not a plan the reviewer saw: the comment says
+        # merging applies nothing, and plan_mode does not record it.
+        self.assertFalse(complete)
+        self.assertIn("Merging this applies nothing:** the plans are too long", body)
+
+    def test_plan_comment_withheld(self):
+        body, complete = hd.plan_comment("f" * 40, {"hydra-wl0": plan(PLAN_CHANGES)}, "it also changes ci/x")
+        self.assertTrue(complete)
+        self.assertIn("Merging this applies nothing:** it also changes ci/x", body)
+
+    def test_apply_comment_escapes_reasons(self):
+        body = hd.apply_comment("f" * 40, {"evil": ("blocked", "hydra.yaml has name 'a|b'\nline two | x")})
+        row = body.splitlines()[-1]
+        self.assertEqual(row, "| `evil` | **blocked**: hydra.yaml has name 'a\\|b' line two \\| x |")
 
 
 if __name__ == "__main__":

@@ -77,6 +77,10 @@ PLAN_TIMEOUT = 10 * 60
 APPLY_TIMEOUT = 45 * 60
 COMMENT_LIMIT = 60000  # GitHub's limit is 65536 characters
 FAILED = ("blocked", "error", "failed")
+# Files that change what the apply job runs, or with what rights. A push to
+# main runs the workflow as merged, so a PR that changes these is reviewed as
+# code, not through its plan: its plans are shown but never recorded.
+MACHINERY_RE = re.compile(r"^(\.github/|scripts/ci/|ci/)")
 
 
 class Blocked(Exception):
@@ -140,14 +144,28 @@ def classify(plan_text, exit_code):
     return "nochange"
 
 
-def plan_state(results):
-    """The commit status for a set of plan results: (state, description)."""
+def machinery(paths):
+    """The paths among a PR's changes that change the deploy machinery."""
+    return sorted(p for p in paths if MACHINERY_RE.match(p))
+
+
+def plan_state(results, withheld=""):
+    """The commit status for a set of plan results: (state, description).
+
+    withheld is why the plans are not recorded (so merging applies none of
+    them), or "".
+    """
     statuses = [r["status"] for r in results.values()]
     if "error" in statuses:
         return "error", "hydra plan failed; see the comment"
+    if withheld:
+        return "failure", f"merging applies nothing: {withheld}"
     if "invalid" in statuses or "refused" in statuses:
         return "failure", "a person has to resolve a refusal; see the comment"
-    if any(r["status"] == "changes" and n in PLAN_ONLY for n, r in results.items()):
+    changed = [n for n, r in results.items() if r["status"] == "changes"]
+    if any(n in PLAN_ONLY for n in changed):
+        if any(n not in PLAN_ONLY for n in changed):
+            return "success", "planned; merging applies the workload plans, a plan-only cluster is applied by hand"
         return "success", "planned; a plan-only cluster is applied by hand"
     return "success", "planned; merging applies these plans"
 
@@ -188,8 +206,8 @@ def candidate_artifacts(artifacts, head_sha, merged_at):
     want = ARTIFACT_PREFIX + head_sha
     good = [a for a in artifacts
             if a.get("name") == want and not a.get("expired")
-            and a.get("created_at", "") <= merged_at]
-    return sorted(good, key=lambda a: a.get("created_at", ""), reverse=True)
+            and a.get("created_at") and merged_at and a["created_at"] <= merged_at]
+    return sorted(good, key=lambda a: a["created_at"], reverse=True)
 
 
 def trusted_run(run, repo):
@@ -213,13 +231,13 @@ def plans_match(plans, repo, pr):
 def pick_pr(pulls, commit, tip, is_ancestor):
     """The merged PR behind commit on main: its merge commit lies between
     commit and tip (a squash or merge commit is commit itself; a rebase merge
-    ends at or after it)."""
-    for p in pulls:
-        m = p.get("merge_commit_sha")
-        if p.get("merged_at") and (p.get("base") or {}).get("ref") == MAIN and m \
-                and is_ancestor(commit, m) and is_ancestor(m, tip):
-            return p
-    return None
+    ends at or after it). If several do (a branch built on another PR's), the
+    first merged brought commit to main."""
+    found = [p for p in pulls
+             if p.get("merged_at") and (p.get("base") or {}).get("ref") == MAIN
+             and p.get("merge_commit_sha")
+             and is_ancestor(commit, p["merge_commit_sha"]) and is_ancestor(p["merge_commit_sha"], tip)]
+    return min(found, key=lambda p: (p["merged_at"], p.get("number", 0)), default=None)
 
 
 def evaluate(name, text, now, find_reviewed):
@@ -251,7 +269,23 @@ def fence(text, lang=""):
     return f"{ticks}{lang}\n{text.rstrip()}\n{ticks}"
 
 
-def plan_comment(head_sha, results):
+def plan_comment(head_sha, results, withheld=""):
+    """The plan comment and whether it shows every plan in full. A plan that
+    does not fit is not recorded (see plan_mode): merging applies only what
+    the comment showed."""
+    body = _plan_comment(head_sha, results, withheld)
+    if len(body) <= COMMENT_LIMIT:
+        return body, True
+    reason = withheld or "the plans are too long to show in full in this comment"
+    body = _plan_comment(head_sha, results, reason)
+    cut = body[:COMMENT_LIMIT]
+    fence_open = open_fence(cut)
+    if fence_open:
+        cut += "\n" + fence_open
+    return cut + "\n\n(truncated; the full plans are in the run's log)", False
+
+
+def _plan_comment(head_sha, results, withheld):
     label = {"nochange": "No changes", "changes": "Changes", "refused": "**Refused**",
              "error": "**Plan failed**", "invalid": "**Not planned**", "deleted": "Removed"}
     # Headings first, so a truncated comment still says what each plan is.
@@ -260,6 +294,10 @@ def plan_comment(head_sha, results):
         note = " (plan-only: applied by hand after an etcd backup)" if name in PLAN_ONLY else ""
         out.append(f"- `{name}`: {label[r['status']]}{note}")
     out.append("")
+    if withheld:
+        out.append(f"**Merging this applies nothing:** {withheld}. Apply by hand after merging, "
+                   "or split the change so each pull request's plan can be shown and applied.")
+        out.append("")
     out.append("Merging applies a cluster's plan only if, at merge, its hydra.yaml is the one "
                "planned here and planning it again gives this same plan. This comment is for "
                "reading only; nothing written in a comment approves anything.")
@@ -271,14 +309,7 @@ def plan_comment(head_sha, results):
             out.append(fence(r["plan"] or "(no output)", "diff"))
             if r["status"] == "error" and r.get("stderr"):
                 out.append(fence(r["stderr"]))
-    body = "\n".join(out)
-    if len(body) > COMMENT_LIMIT:
-        cut = body[:COMMENT_LIMIT]
-        fence_open = open_fence(cut)
-        if fence_open:
-            cut += "\n" + fence_open
-        body = cut + "\n\n(truncated; the full plans are in the run's artifact)"
-    return body
+    return "\n".join(out)
 
 
 def open_fence(text):
@@ -295,10 +326,16 @@ def open_fence(text):
     return current
 
 
+def cell(text):
+    """text safe inside a Markdown table cell (a reason can quote a PR's
+    hydra.yaml, or a multi-line YAML error)."""
+    return " ".join(str(text).split()).replace("\\", "\\\\").replace("|", "\\|")
+
+
 def apply_comment(sha, outcomes):
     out = [APPLY_MARKER, f"### hydra apply at {sha[:12]}", "", "| Cluster | Result |", "|---|---|"]
     for name, (action, reason) in outcomes.items():
-        out.append(f"| `{name}` | **{action}**: {reason} |")
+        out.append(f"| `{name}` | **{action}**: {cell(reason)} |")
     return "\n".join(out)
 
 
@@ -413,8 +450,15 @@ def plan_mode(a, event, repo):
                     results[name] = {"status": "invalid", "message": f"hydra.yaml {problem}."}
                     continue
                 results[name] = hydra_plan(name, text, work, a.hydra, a.kubeconfig)
-        upsert_comment(repo, number, plan_comment(head, results))
-        state, desc = plan_state(results)
+        mixed = machinery(paths)
+        withheld = (f"this pull request also changes the deploy machinery ({', '.join(mixed)}), "
+                    "which runs on merge and is reviewed as code, not through a plan") if mixed else ""
+        body, complete = plan_comment(head, results, withheld)
+        if not complete and not withheld:
+            withheld = "the plans are too long to show in full in the comment"
+        upsert_comment(repo, number, body)
+        state, desc = plan_state(results, "deploy machinery changed" if mixed else
+                                 "plan too long to show" if withheld else "")
         set_status(repo, head, state, desc)
     except Exception:
         try:
@@ -422,13 +466,18 @@ def plan_mode(a, event, repo):
         except Exception:  # pylint: disable=broad-except
             pass
         raise
+    for name, r in results.items():
+        print(f"{name}: {r['status']}")
+        if r.get("plan"):
+            print(r["plan"])  # the full plan, which a truncated comment does not show
+    if withheld:
+        print(f"::warning::plans not recorded: {withheld}")
+        return 1
     # Recorded only once shown: apply trusts nothing the PR did not display.
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "plans.json").write_text(json.dumps(
         {"repository": repo, "pr": number, "head_sha": head, "results": results}, indent=1))
-    for name, r in results.items():
-        print(f"{name}: {r['status']}")
     return 0 if state == "success" else 1
 
 
@@ -437,8 +486,10 @@ def reviewed_plans(repo, pr):
     Blocked. Artifacts that fail a check are skipped, not fatal: anything can
     upload an artifact by that name, only this workflow's are believed."""
     head = pr["head"]["sha"]
-    listing = gh(f"repos/{repo}/actions/artifacts?per_page=100&name={ARTIFACT_PREFIX}{head}")
-    for art in candidate_artifacts(listing.get("artifacts", []), head, pr["merged_at"]):
+    pages = gh(f"repos/{repo}/actions/artifacts?per_page=100&name={ARTIFACT_PREFIX}{head}",
+               "--paginate", "--slurp") or []
+    listing = [art for page in pages for art in page.get("artifacts", [])]
+    for art in candidate_artifacts(listing, head, pr["merged_at"]):
         run_ = gh(f"repos/{repo}/actions/runs/{art['workflow_run']['id']}")
         if not trusted_run(run_, repo):
             continue
