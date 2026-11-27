@@ -6,9 +6,12 @@ name: Lab connectivity (no credentials)
 #   - the bastion's SSH port answers (the only thing tag:git-ci may reach);
 #   - every target in LAB_MUST_NOT_REACH does not;
 #   - the runner's node is ephemeral and is logged out when the job ends.
-# It holds no secret: the federated identity needs none, and nothing here logs
-# in to the bastion. Lab-specific names live in the environment's variables,
-# not in this public repository.
+# It holds no credential: the federated identity needs none, and nothing here
+# logs in to the bastion. The lab-specific values (client ID, audience, the
+# bastion's name and the must-not-reach list) are not credentials either, but
+# they are stored as environment *secrets*: this repository is public, so are
+# its run logs, and GitHub masks secrets in them where it prints variables
+# (including every step's `with:` and `env:`).
 
 on:
   workflow_dispatch:
@@ -31,36 +34,37 @@ jobs:
     permissions:
       id-token: write # the Tailscale action exchanges GitHub's OIDC token
     env:
-      BASTION: ${{ vars.LAB_BASTION }}
-      MUST_NOT_REACH: ${{ vars.LAB_MUST_NOT_REACH }}
+      BASTION: ${{ secrets.LAB_BASTION }}
+      MUST_NOT_REACH: ${{ secrets.LAB_MUST_NOT_REACH }}
     steps:
-      - name: Check the environment's variables
+      - name: Check the environment's secrets
         run: |
           missing=()
           for v in TS_OIDC_CLIENT_ID TS_OIDC_AUDIENCE LAB_BASTION LAB_MUST_NOT_REACH; do
             [ -n "${!v}" ] || missing+=("$v")
           done
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::error::set these variables on the 'lab' environment: ${missing[*]}"
+            echo "::error::set these secrets on the 'lab' environment: ${missing[*]}"
             exit 1
           fi
         env:
-          TS_OIDC_CLIENT_ID: ${{ vars.TS_OIDC_CLIENT_ID }}
-          TS_OIDC_AUDIENCE: ${{ vars.TS_OIDC_AUDIENCE }}
-          LAB_BASTION: ${{ vars.LAB_BASTION }}
-          LAB_MUST_NOT_REACH: ${{ vars.LAB_MUST_NOT_REACH }}
+          TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
+          TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
+          LAB_BASTION: ${{ secrets.LAB_BASTION }}
+          LAB_MUST_NOT_REACH: ${{ secrets.LAB_MUST_NOT_REACH }}
 
       - name: Join the tailnet (ephemeral, tag:git-ci)
         uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
         with:
-          oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
-          audience: ${{ vars.TS_OIDC_AUDIENCE }}
+          oauth-client-id: ${{ secrets.TS_OIDC_CLIENT_ID }}
+          audience: ${{ secrets.TS_OIDC_AUDIENCE }}
           tags: tag:git-ci
           hostname: gha-lab-${{ github.run_id }}-${{ github.run_attempt }}
           version: '1.104.7'
           sha256sum: e56693ff74a64f2591b7e819c280635a100aae1ddfb0ef058fcd052b7cd8d16c
           use-cache: 'false'
-          ping: ${{ vars.LAB_BASTION }}
+          # No `ping:` here: its output names the bastion and its tailnet IP,
+          # which masking the secret's exact value would not hide.
 
       - name: This node
         run: |
@@ -81,8 +85,13 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           # Allowed: the bastion's SSH. Read its banner only; never log in.
-          if banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/$BASTION/22 && head -c 255 <&3 | head -n1" 2>/dev/null) \
-              && [[ "$banner" == SSH-2.0-* ]]; then
+          # Retry for up to 30s: a new node takes a moment to reach its peers.
+          banner=
+          for _ in 1 2 3 4 5 6; do
+            banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/$BASTION/22 && head -c 255 <&3 | head -n1" 2>/dev/null) && break
+            sleep 5
+          done
+          if [[ "$banner" == SSH-2.0-* ]]; then
             echo "| \`bastion:22\` | open | open (${banner%%$'\r'}) |" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "| \`bastion:22\` | open | **closed** |" >> "$GITHUB_STEP_SUMMARY"
@@ -95,8 +104,8 @@ jobs:
           for target in $MUST_NOT_REACH; do
             i=$((i + 1))
             host=${target%:*} port=${target##*:}
-            # Targets are reported by position, not name, to keep the lab's
-            # addresses out of a public run log.
+            # Targets are reported by position: GitHub masks a secret's whole
+            # value, not the parts of it this loop prints.
             if open "$host" "$port"; then
               echo "| must-not-reach #$i (port $port) | closed | **open** |" >> "$GITHUB_STEP_SUMMARY"
               echo "::error::must-not-reach target #$i (port $port) accepted a connection"
