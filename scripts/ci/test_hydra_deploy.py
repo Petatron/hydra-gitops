@@ -1,5 +1,6 @@
 """Tests for hydra_deploy's decisions: what is planned, and when apply runs."""
 
+import os
 import unittest
 
 import hydra_deploy as hd
@@ -198,6 +199,34 @@ class TrustTests(unittest.TestCase):
         self.assertTrue(hd.plans_match(good, REPO, pr))
         for change in [{"pr": 8}, {"head_sha": "x" * 40}, {"repository": "o/r"}]:
             self.assertFalse(hd.plans_match({**good, **change}, REPO, pr), change)
+
+    def test_machinery_matches(self):
+        self.assertTrue(hd.machinery_matches({"machinery": "d1"}, "d1"))
+        self.assertFalse(hd.machinery_matches({"machinery": "d0"}, "d1"))  # changed since the plan
+        self.assertFalse(hd.machinery_matches({}, "d1"))  # recorded before this check existed
+        self.assertFalse(hd.machinery_matches({"machinery": ""}, ""))
+
+    def test_machinery_digest_tracks_only_the_machinery(self):
+        import subprocess, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            def g(*a):
+                return subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True).stdout.strip()
+            g("init", "-q")
+            g("config", "user.email", "t@example.com"); g("config", "user.name", "t")
+            for f in ["scripts/ci/x.py", "ci/a.yaml", ".github/workflows/w.yaml", "clusters/c/hydra.yaml"]:
+                os.makedirs(os.path.join(d, os.path.dirname(f)), exist_ok=True)
+                open(os.path.join(d, f), "w").write("1")
+            g("add", "-A"); g("commit", "-qm", "a")
+            old = os.getcwd()
+            os.chdir(d)
+            try:
+                d1 = hd.machinery_digest("HEAD")
+                open("clusters/c/hydra.yaml", "w").write("2"); g("commit", "-qam", "b")
+                self.assertEqual(hd.machinery_digest("HEAD"), d1)  # a cluster change is not machinery
+                open("scripts/ci/x.py", "w").write("2"); g("commit", "-qam", "c")
+                self.assertNotEqual(hd.machinery_digest("HEAD"), d1)
+            finally:
+                os.chdir(old)
 
     def test_pick_pr(self):
         # main: base -- c1 (squash of #3) -- c2 -- tip; #5 rebase-merged ending at c2

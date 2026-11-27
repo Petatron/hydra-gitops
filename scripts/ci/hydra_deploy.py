@@ -21,7 +21,11 @@ apply  (push to main)
        to its hydra.yaml and applies only if all of these hold:
          - the PR's plan artifact came from this workflow on
            pull_request_target, before the PR was merged (a comment, a branch
-           workflow or a later re-run cannot stand in for it);
+           workflow or a later re-run cannot stand in for it), and recorded a
+           successful hydra/plan (only those are recorded);
+         - the deploy machinery (.github/, scripts/ci/, ci/) on main is the
+           one that made the plan: a plan is never applied by code it was not
+           made with;
          - hydra.yaml on main is byte for byte the one that was planned;
          - planning main again gives the same plan (anything else is drift,
            or another change in between);
@@ -223,6 +227,11 @@ def already_applied(statuses, name):
                for s in statuses)
 
 
+def machinery_matches(plans, digest):
+    """Whether plans were made by the deploy machinery whose digest is given."""
+    return bool(digest) and plans.get("machinery") == digest
+
+
 def plans_match(plans, repo, pr):
     return (plans.get("repository") == repo and plans.get("pr") == pr["number"]
             and plans.get("head_sha") == pr["head"]["sha"])
@@ -351,6 +360,11 @@ def git(*args):
     return run(["git", *args], check=True).stdout
 
 
+def machinery_digest(rev):
+    """A digest of the deploy machinery's trees at rev (see MACHINERY_RE)."""
+    return sha256(git("ls-tree", rev, "--", ".github", "scripts/ci", "ci"))
+
+
 def is_ancestor(a, b):
     return run(["git", "merge-base", "--is-ancestor", a, b]).returncode == 0
 
@@ -473,19 +487,27 @@ def plan_mode(a, event, repo):
     if withheld:
         print(f"::warning::plans not recorded: {withheld}")
         return 1
+    if state != "success":
+        # Only a successful plan is ever recorded, so apply never weighs one
+        # that a person was asked to look at.
+        print(f"::warning::plans not recorded: hydra/plan is {state}")
+        return 1
     # Recorded only once shown: apply trusts nothing the PR did not display.
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "plans.json").write_text(json.dumps(
-        {"repository": repo, "pr": number, "head_sha": head, "results": results}, indent=1))
+        {"repository": repo, "pr": number, "head_sha": head,
+         "machinery": machinery_digest("HEAD"), "results": results}, indent=1))
     return 0 if state == "success" else 1
 
 
-def reviewed_plans(repo, pr):
-    """plans.json recorded for the PR's final head before it merged, or raise
-    Blocked. Artifacts that fail a check are skipped, not fatal: anything can
-    upload an artifact by that name, only this workflow's are believed."""
+def reviewed_plans(repo, pr, machinery):
+    """plans.json recorded for the PR's final head before it merged, by the
+    deploy machinery whose digest is machinery, or raise Blocked. Artifacts
+    that fail a check are skipped, not fatal: anything can upload an artifact
+    by that name, only this workflow's are believed."""
     head = pr["head"]["sha"]
+    stale = False
     pages = gh(f"repos/{repo}/actions/artifacts?per_page=100&name={ARTIFACT_PREFIX}{head}",
                "--paginate", "--slurp") or []
     listing = [art for page in pages for art in page.get("artifacts", [])]
@@ -498,7 +520,12 @@ def reviewed_plans(repo, pr):
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
             plans = json.loads(z.read("plans.json"))
         if plans_match(plans, repo, pr):
-            return plans["results"]
+            if machinery_matches(plans, machinery):
+                return plans["results"]
+            stale = True
+    if stale:
+        raise Blocked("the deploy machinery on main changed after this pull request was planned; "
+                      "plan it again in a new pull request")
     raise Blocked(f"no plan of this workflow was recorded for the pull request's final head "
                   f"{head[:12]} before it was merged")
 
@@ -532,7 +559,7 @@ def apply_one(a, repo, name, tip, before, work, plans_cache):
         found["pr"] = pr
         if pr["number"] not in plans_cache:
             try:
-                plans_cache[pr["number"]] = reviewed_plans(repo, pr)
+                plans_cache[pr["number"]] = reviewed_plans(repo, pr, machinery_digest(tip))
             except Blocked as e:
                 plans_cache[pr["number"]] = e
         plans = plans_cache[pr["number"]]

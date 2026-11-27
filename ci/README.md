@@ -9,10 +9,12 @@ the lab. The decisions are in `scripts/ci/hydra_deploy.py`; its tests run in the
 
 - **Pull request into `main`** (same repository; PRs from forks are never planned). The workflow,
   running `main`'s files, plans every `hydra.yaml` the PR changes, as it stands at the PR's head.
-  It posts one comment with the plans and sets the commit status `hydra/plan`. Only then does it
-  record the plans, as the artifact `hydra-plan-<head sha>`. Each push to the PR plans again.
+  It posts one comment with the plans and sets the commit status `hydra/plan`. Only then, and only
+  if the status is `success`, does it record the plans, as the artifact `hydra-plan-<head sha>`.
+  Each push to the PR plans again.
   - `success`: merging applies the plans, except for a plan-only cluster.
-  - `failure`: a person has to look first. One of these happened:
+  - `failure`: a person has to look first, and nothing is recorded, so merging applies nothing (not
+    even the PR's other clusters). One of these happened:
     - a plan has a `!` line: a refusal, or a note such as the one-time unprotected control-plane
       roll;
     - a `hydra.yaml` names a cluster other than its directory, or a namespace other than `default`;
@@ -27,6 +29,9 @@ the lab. The decisions are in `scripts/ci/hydra_deploy.py`; its tests run in the
   no changes is left alone. For a cluster with changes, the run takes the plan recorded on the PR
   whose merge last changed its `hydra.yaml`, and applies only if all of these hold:
   - the plan artifact came from this workflow on a pull request, before the merge;
+  - the deploy machinery (`.github/`, `scripts/ci/`, `ci/`) on `main` is the same as when the plan
+    was made. A PR planned before a machinery change merged has to be planned again (push to it,
+    or close and reopen it);
   - `hydra.yaml` on `main` is byte for byte the one planned at the PR's final head;
   - planning `main` again gives exactly the same plan, with no `!` line;
   - that plan was never applied before. Each apply first marks the PR's head commit with the
@@ -81,7 +86,7 @@ Cluster API objects in `default`, and RBAC cannot narrow that.
 - **The hypervisor client key.** It can read `hydra-wl0-libvirt-pki`, because apply checks the
   hypervisor credentials with a full read.
 
-`bash ci/test-policy.sh` tests all of this in a throwaway kind cluster, in 29 cases. Run it after
+`bash ci/test-policy.sh` tests all of this in a throwaway kind cluster, in 32 cases. Run it after
 any change to `ci/hydra-mgmt-access.yaml`. The cases:
 - dry runs against hydra-mgmt pass;
 - real writes to hydra-mgmt are refused, including unlabelled older objects and a new
@@ -89,6 +94,8 @@ any change to `ci/hydra-mgmt-access.yaml`. The cases:
 - writes to wl0 pass;
 - foreign, shared-value, empty or multi-key proxy selectors are refused, and so is a cluster
   claiming hydra-mgmt's address;
+- a proxy of another shape (one that selects hydra-mgmt, say) can't be deleted or re-pointed,
+  which would uninstall its chart; a wl0 proxy as hydra renders it can be pruned;
 - RBAC still blocks deletes and Secrets;
 - a person is unaffected.
 
@@ -171,6 +178,8 @@ does not review it:
 | An apply **failed** | The run has hydra's output. Fix the cause, then apply by hand or open a follow-up PR. A plan is attempted at most once (`hydra/apply/<cluster>` on the PR's head), so re-running the run does not retry it; that is intended. Applying by hand is always safe to repeat |
 | A change was **rolled back by hand** | Later runs block the cluster instead of re-applying the old PR's plan: it was applied once already. Merge a revert to make `main` match, or apply by hand |
 | **Add a cluster** | First add its `<name>-kubeconfig` and `<name>-libvirt-pki` Secret names to `resourceNames` in `ci/hydra-mgmt-access.yaml`, and apply that by hand. Otherwise its apply fails when it reads them, possibly after creating machines. Nothing enforces this order |
+| **Move hydra-mgmt's control-plane address** | Change `protectedEndpoint` in `ci/hydra-mgmt-access.yaml` in the same PR, and re-apply that file by hand when hydra-mgmt is applied. The policy holds a copy of the address; until it is updated, a workload cluster could claim the new one |
+| A **machinery** PR merged while `hydra.yaml` PRs were open | Their plans are no longer applied (they were made by the old code). Push to each, or close and reopen it, to plan again |
 | **Pause** deploys | Disable the workflow (Actions → hydra deploy → Disable). PRs still validate |
 | **Upgrade hydra** | Bump the pin in `scripts/ci/install-tools.sh` and `tool-checksums.txt`; both workflows use it |
 

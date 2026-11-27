@@ -171,6 +171,8 @@ spec:
     - name: protected
       expression: "'hydra-mgmt'"
     # hydra-mgmt's control-plane address (its Cluster's controlPlaneEndpoint).
+    # A copy: moving hydra-mgmt's endpoint means changing it here and
+    # re-applying this file by hand, in the same change (ci/README.md).
     - name: protectedEndpoint
       expression: "'192.168.15.11'"
     # Objects are hydra-mgmt's by hydra's label, Cluster API's label,
@@ -199,17 +201,20 @@ spec:
     # An addon proxy selects only its own cluster, the way hydra renders one:
     # exactly one matchLabels entry, keyed cni.hydra.io/cilium or
     # hydra.io/cluster, whose value is the proxy's own hydra.io/cluster label.
+    # Checked on the proxy before and after the write: deleting a proxy, or
+    # re-pointing it, uninstalls its chart from the clusters it selected, so
+    # CI may delete or change only a proxy of that shape.
     - expression: >-
-        object == null || object.kind != 'HelmChartProxy' || (
-          has(object.metadata.labels) && 'hydra.io/cluster' in object.metadata.labels &&
-          object.metadata.labels['hydra.io/cluster'] != '' &&
-          has(object.spec.clusterSelector) && has(object.spec.clusterSelector.matchLabels) &&
-          size(object.spec.clusterSelector.matchLabels) == 1 &&
-          (!has(object.spec.clusterSelector.matchExpressions) || size(object.spec.clusterSelector.matchExpressions) == 0) &&
-          object.spec.clusterSelector.matchLabels.all(k,
+        [object, oldObject].all(o, o == null || o.kind != 'HelmChartProxy' || (
+          has(o.metadata.labels) && 'hydra.io/cluster' in o.metadata.labels &&
+          o.metadata.labels['hydra.io/cluster'] != '' &&
+          has(o.spec.clusterSelector) && has(o.spec.clusterSelector.matchLabels) &&
+          size(o.spec.clusterSelector.matchLabels) == 1 &&
+          (!has(o.spec.clusterSelector.matchExpressions) || size(o.spec.clusterSelector.matchExpressions) == 0) &&
+          o.spec.clusterSelector.matchLabels.all(k,
             (k == 'cni.hydra.io/cilium' || k == 'hydra.io/cluster') &&
-            object.spec.clusterSelector.matchLabels[k] == object.metadata.labels['hydra.io/cluster']))
-      message: hydra CI may create an addon proxy only for its own cluster (one matchLabels entry, cni.hydra.io/cilium or hydra.io/cluster, equal to its hydra.io/cluster label)
+            o.spec.clusterSelector.matchLabels[k] == o.metadata.labels['hydra.io/cluster'])))
+      message: hydra CI may create, change or delete an addon proxy only for its own cluster (one matchLabels entry, cni.hydra.io/cilium or hydra.io/cluster, equal to its hydra.io/cluster label)
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding

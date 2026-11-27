@@ -125,7 +125,12 @@ mg='{"hydra.io/cluster":"hydra-mgmt"}'; wl='{"hydra.io/cluster":"hydra-wl0"}'
 # Seed as admin: the objects that exist on hydra-mgmt today.
 for o in "$(obj $C Cluster hydra-mgmt "$mg" '{}')" "$(obj $KCPV KubeadmControlPlane hydra-mgmt-cp "$mg" '{"replicas":3}')" \
          "$(obj $HMTV HydraMachineTemplate hydra-mgmt-cp-pdh '{}' '{}')" "$(obj $HMTV HydraMachineTemplate hydra-wl0-md-0 '{}' '{}')" \
-         "$(obj $KCPV KubeadmControlPlane hydra-wl0-cp "$wl" '{"replicas":3}')"; do echo "$o" | $K apply -f - >/dev/null; done
+         "$(obj $KCPV KubeadmControlPlane hydra-wl0-cp "$wl" '{"replicas":3}')" \
+         "$(obj $HCPV HelmChartProxy foreign-proxy "$wl" '{"clusterSelector":{"matchLabels":{"cni.hydra.io/cilium":"hydra-mgmt"}}}')" \
+         "$(obj $HCPV HelmChartProxy hydra-wl0-old "$wl" '{"clusterSelector":{"matchLabels":{"hydra.io/cluster":"hydra-wl0"}}}')"; do
+  # A seed that failed would turn later "deny" cases into misses that pass.
+  echo "$o" | $K apply -f - >/dev/null || { echo "seeding failed: $o" >&2; exit 1; }
+done
 
 echo "== hydra-mgmt: plan (dry run) passes, real writes are refused"
 check allow "dry-run create Cluster hydra-mgmt (plan)" -- bash -c "echo '$(obj $C Cluster hydra-mgmt "$mg" '{"x":1}')' | $K $SA apply --server-side --field-manager=hydra-hydra-mgmt --force-conflicts --dry-run=server -f -"
@@ -151,6 +156,9 @@ check deny  "HCP with a second, foreign matchLabel" -- bash -c "echo '$(obj $HCP
 check allow "HCP metrics-server style (hydra.io/cluster: own)" -- bash -c "echo '$(obj $HCPV HelmChartProxy hydra-wl0-ms "$wl" '{"clusterSelector":{"matchLabels":{"hydra.io/cluster":"hydra-wl0"}}}')' | $K $SA create -f -"
 check deny  "HCP selecting by a shared value (reviewer: true/true)" -- bash -c "echo '$(obj $HCPV HelmChartProxy x6 '{"hydra.io/cluster":"true"}' '{"clusterSelector":{"matchLabels":{"anykey":"true"}}}')' | $K $SA create -f -"
 check deny  "HCP with an empty own label" -- bash -c "echo '$(obj $HCPV HelmChartProxy x7 '{"hydra.io/cluster":""}' '{"clusterSelector":{"matchLabels":{"hydra.io/cluster":""}}}')' | $K $SA create -f -"
+check deny  "delete an admin-made HCP that selects hydra-mgmt (uninstalls its chart)" -- $K $SA delete helmchartproxies foreign-proxy
+check deny  "re-point an admin-made HCP away from hydra-mgmt" -- $K $SA patch helmchartproxies foreign-proxy --type merge -p '{"spec":{"clusterSelector":{"matchLabels":{"cni.hydra.io/cilium":"hydra-wl0"}}}}'
+check allow "delete a wl0 HCP as hydra renders it (prune)" -- $K $SA delete helmchartproxies hydra-wl0-old
 check deny  "HCP with two allowed keys" -- bash -c "echo '$(obj $HCPV HelmChartProxy x8 "$wl" '{"clusterSelector":{"matchLabels":{"hydra.io/cluster":"hydra-wl0","cni.hydra.io/cilium":"hydra-wl0"}}}')' | $K $SA create -f -"
 echo "== no cluster may take hydra-mgmt's control-plane address"
 check deny  "new HydraCluster claiming 192.168.15.11" -- bash -c "echo '$(obj infrastructure.cluster.x-k8s.io/v1beta1 HydraCluster hydra-wl9 '{"hydra.io/cluster":"hydra-wl9"}' '{"controlPlaneEndpoint":{"host":"192.168.15.11","port":6443}}')' | $K $SA create -f -"
