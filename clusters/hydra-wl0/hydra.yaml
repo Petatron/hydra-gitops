@@ -2,6 +2,8 @@
 # the hydra-wl0 root Application watches clusters/hydra-wl0/apps only. The CLI
 # applies this to the management cluster (hydra-mgmt), for example
 #   hydra cluster plan -f clusters/hydra-wl0/hydra.yaml --management-kubeconfig <hydra-mgmt kubeconfig>
+# Pull requests get that plan as a comment, and merging applies it, through
+# .github/workflows/hydra-deploy.yaml (PET-102; see ci/README.md).
 # Values are this site's (the reference lab), not defaults.
 #
 # Cilium is hydra's (cni: hydra, PET-101): a HelmChartProxy that Cluster API
