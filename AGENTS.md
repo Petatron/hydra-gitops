@@ -97,7 +97,7 @@ A merge that changes a workload cluster's hydra.yaml therefore changes that clus
 Read the plan comment before merging.
 
 `validate.py` checks hydra.yaml by rendering it with the `hydra` binary that `install-tools.sh`
-pins (v0.6.0), not with kubeconform. Bump that pin, with its checksums,
+pins (v0.7.0), not with kubeconform. Bump that pin, with its checksums,
 when a hydra.yaml needs a newer CLI.
 
 Schemas under `schemas/` are **generated, not hand-written** — pinned to immutable upstream commits
