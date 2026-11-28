@@ -26,8 +26,11 @@ would reconcile the CNI, and deleting such an Application with a resources final
 the CNI down.
 
 ```text
-.github/            # validate workflow, PR template, CODEOWNERS
-scripts/ci/         # validate.py + its failure-case tests, pinned tool installer
+.github/            # validate, hydra deploy and lab connectivity workflows, PR template, CODEOWNERS
+scripts/ci/         # validate.py + its failure-case tests, pinned tool installer;
+                    #   hydra_deploy.py (plan/apply decisions for hydra deploy) + its tests
+ci/                 # hydra deploy: the CI identity + guard policy for hydra-mgmt (applied by hand),
+                    #   its kind test (test-policy.sh) and runbook
 schemas/            # pinned CRD JSON schemas and their provenance
 bootstrap/          # home cluster's one-time entry point (install.sh, root-app.yaml)
 apps/               # home cluster Applications — Argo CD, Cilium, KEDA, MetalLB
@@ -83,8 +86,18 @@ It also enforces source boundaries (no self-repository URL sprawl), rejects dupl
 requires Helm image pins.
 
 Each cluster's `clusters/<name>/hydra.yaml` (the `hydra` CLI's input, PET-96) is not a Kubernetes
-resource and is never reconciled by Argo CD. `validate.py` checks it by rendering it with the `hydra`
-binary that `install-tools.sh` pins (v0.6.0), not with kubeconform. Bump that pin, with its checksums,
+resource and is never reconciled by Argo CD. **It is deployed by the `hydra deploy` workflow**
+(`.github/workflows/hydra-deploy.yaml`, PET-102; see `ci/README.md`):
+- a same-repository PR touching it gets a `hydra cluster plan` comment and a `hydra/plan` status;
+- after merge, the workflow applies that plan, but only if planning `main` again gives the same plan;
+- `hydra-mgmt` is plan-only and is applied by hand after an etcd backup. An admission policy in
+  `ci/hydra-mgmt-access.yaml` keeps CI from writing to it.
+
+A merge that changes a workload cluster's hydra.yaml therefore changes that cluster within minutes.
+Read the plan comment before merging.
+
+`validate.py` checks hydra.yaml by rendering it with the `hydra` binary that `install-tools.sh`
+pins (v0.6.0), not with kubeconform. Bump that pin, with its checksums,
 when a hydra.yaml needs a newer CLI.
 
 Schemas under `schemas/` are **generated, not hand-written** — pinned to immutable upstream commits
